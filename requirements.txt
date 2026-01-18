@@ -6,3 +6,5 @@ openpyxl
 requests
 trafilatura
 lxml
+playwright
+playwright-stealth

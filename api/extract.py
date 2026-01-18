@@ -1,6 +1,9 @@
 import io
 import re
 import trafilatura
+import random
+from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 from pypdf import PdfReader
 from pptx import Presentation
 from docx import Document
@@ -11,6 +14,13 @@ app = Flask(__name__)
 
 # Set max content length to 25MB
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
+]
 
 def clean_text(text):
     if not text:
@@ -23,6 +33,45 @@ def clean_text(text):
     # Clean weird spacing and extra newlines
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
+
+def fetch_with_playwright(url):
+    """
+    Simulates a real browser session to bypass bot protection and render JS.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        # Use a random modern user agent
+        user_agent = random.choice(USER_AGENTS)
+        
+        context = browser.new_context(
+            user_agent=user_agent,
+            viewport={'width': 1280, 'height': 800},
+            device_scale_factor=1,
+        )
+        
+        page = context.new_page()
+        # Apply stealth patches
+        stealth_sync(page)
+        
+        try:
+            # Navigate with a generous timeout (30s)
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            
+            # Wait for any potential dynamic redirects or network activity to settle
+            page.wait_for_timeout(2000) 
+            
+            # Simulated Human Behavior: Scroll down to trigger lazy-loading
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
+            page.wait_for_timeout(1000)
+            
+            # Get the fully rendered HTML
+            html_content = page.content()
+            return html_content
+        except Exception as e:
+            print(f"Playwright Error: {str(e)}")
+            return None
+        finally:
+            browser.close()
 
 def extract_metadata_heuristics(full_text, filename_or_title):
     text_str = str(full_text)
@@ -53,22 +102,21 @@ def extract_metadata_heuristics(full_text, filename_or_title):
 def process_extracted_text(full_text, title, base_metadata=None):
     text_str = str(full_text)
     
-    # 1. Limit total text (200,000 chars)
+    # 1. Limit total text (200,000 chars) for performance
     limit_total = 200000
     limited_text = text_str[:limit_total]
 
     # 2. Merge Heuristics or Metadata from Trafilatura
     metadata = extract_metadata_heuristics(limited_text, title)
     if base_metadata:
-        # Only overwrite if the base_metadata has actual content
         for key, value in base_metadata.items():
             if value:
                 metadata[key] = value
     
-    # 3. Snippet for AI (Groq/Gemini) - 7500 chars
+    # 3. Snippet for AI (Groq/Gemini)
     ai_snippet = limited_text[:7500]
     
-    # 4. Split text into 10 chunks (20,000 chars each)
+    # 4. Split text into chunks
     chunk_size = 20000
     chunks = [limited_text[i:i+chunk_size] for i in range(0, len(limited_text), chunk_size)][:10]
 
@@ -81,44 +129,44 @@ def process_extracted_text(full_text, title, base_metadata=None):
 @app.route('/api/extract', methods=['POST'])
 def extract():
     try:
-        # HANDLING URL EXTRACTION (Direct Source Extraction via Trafilatura)
+        # HANDLING URL EXTRACTION (Browser-Like Fetching via Playwright)
         if request.is_json:
             data = request.get_json()
             url = data.get('url')
             if not url:
                 return jsonify({"status": "error", "message": "No URL provided"}), 400
             
-            try:
-                # Fetch content using trafilatura (handles some dynamic content and clean download)
-                downloaded = trafilatura.fetch_url(url)
-                if downloaded is None:
-                    return jsonify({"status": "error", "message": "Failed to fetch content from URL. Site might be protected."}), 422
-                
-                # Extract clean text content
-                full_text = trafilatura.extract(downloaded, include_comments=False, include_tables=True, no_fallback=False)
-                # Extract metadata directly from source HTML tags
-                metadata_raw = trafilatura.extract_metadata(downloaded)
-                
-                if not full_text:
-                    return jsonify({"status": "error", "message": "Content extraction failed. No readable text found."}), 422
+            # Use Playwright instead of trafilatura.fetch_url for the initial download
+            html_source = fetch_with_playwright(url)
+            
+            if not html_source:
+                return jsonify({
+                    "status": "error", 
+                    "message": "Failed to bypass site protection. The target website is blocking automated access."
+                }), 422
+            
+            # Extract clean text from the Playwright HTML source
+            full_text = trafilatura.extract(html_source, include_comments=False, include_tables=True)
+            # Extract metadata from the Playwright HTML source
+            metadata_raw = trafilatura.extract_metadata(html_source)
+            
+            if not full_text:
+                return jsonify({"status": "error", "message": "Extraction succeeded but no readable text was found."}), 422
 
-                # Map Trafilatura metadata to Xeenaps schema
-                source_meta = {}
-                if metadata_raw:
-                    source_meta = {
-                        "title": metadata_raw.title,
-                        "authors": [metadata_raw.author] if metadata_raw.author else [],
-                        "year": metadata_raw.date[:4] if metadata_raw.date else "",
-                        "publisher": metadata_raw.sitename or metadata_raw.hostname or ""
-                    }
-                
-                result_data = process_extracted_text(clean_text(full_text), source_meta.get("title") or url, source_meta)
-                return jsonify({"status": "success", "data": result_data})
+            # Map Trafilatura metadata
+            source_meta = {}
+            if metadata_raw:
+                source_meta = {
+                    "title": metadata_raw.title,
+                    "authors": [metadata_raw.author] if metadata_raw.author else [],
+                    "year": metadata_raw.date[:4] if metadata_raw.date else "",
+                    "publisher": metadata_raw.sitename or metadata_raw.hostname or ""
+                }
+            
+            result_data = process_extracted_text(clean_text(full_text), source_meta.get("title") or url, source_meta)
+            return jsonify({"status": "success", "data": result_data})
 
-            except Exception as e:
-                return jsonify({"status": "error", "message": f"Web Extraction Error: {str(e)}"}), 500
-
-        # HANDLING FILE EXTRACTION (Remains robust for PDF/Office files)
+        # HANDLING FILE EXTRACTION (Remains unchanged for PDF/Office)
         if 'file' not in request.files:
             return jsonify({"status": "error", "message": "No file part"}), 400
         
