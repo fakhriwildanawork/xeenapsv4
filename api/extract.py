@@ -1,9 +1,7 @@
 import io
 import re
-import trafilatura
+import requests
 import random
-from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 from pypdf import PdfReader
 from pptx import Presentation
 from docx import Document
@@ -14,13 +12,6 @@ app = Flask(__name__)
 
 # Set max content length to 25MB
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
-]
 
 def clean_text(text):
     if not text:
@@ -34,44 +25,34 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def fetch_with_playwright(url):
+def fetch_with_jina(url):
     """
-    Simulates a real browser session to bypass bot protection and render JS.
+    Uses Jina Reader (r.jina.ai) to fetch and render the URL.
+    This handles JS rendering, bypasses bot protection, and returns clean Markdown.
     """
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        # Use a random modern user agent
-        user_agent = random.choice(USER_AGENTS)
+    jina_url = f"https://r.jina.ai/{url}"
+    try:
+        # We use a standard requests call because Jina handles the browser work
+        headers = {
+            "Accept": "application/json",
+            "X-With-Generated-Alt": "true" # Optional: gets better descriptions of images
+        }
+        response = requests.get(jina_url, headers=headers, timeout=30)
         
-        context = browser.new_context(
-            user_agent=user_agent,
-            viewport={'width': 1280, 'height': 800},
-            device_scale_factor=1,
-        )
-        
-        page = context.new_page()
-        # Apply stealth patches
-        stealth_sync(page)
-        
-        try:
-            # Navigate with a generous timeout (30s)
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            
-            # Wait for any potential dynamic redirects or network activity to settle
-            page.wait_for_timeout(2000) 
-            
-            # Simulated Human Behavior: Scroll down to trigger lazy-loading
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-            page.wait_for_timeout(1000)
-            
-            # Get the fully rendered HTML
-            html_content = page.content()
-            return html_content
-        except Exception as e:
-            print(f"Playwright Error: {str(e)}")
+        if response.status_code == 200:
+            json_data = response.json()
+            # Jina returns structured data: title, content (markdown), description, etc.
+            return {
+                "content": json_data.get("data", {}).get("content", ""),
+                "title": json_data.get("data", {}).get("title", ""),
+                "description": json_data.get("data", {}).get("description", "")
+            }
+        else:
+            print(f"Jina Error: {response.status_code} - {response.text}")
             return None
-        finally:
-            browser.close()
+    except Exception as e:
+        print(f"Jina Fetch Exception: {str(e)}")
+        return None
 
 def extract_metadata_heuristics(full_text, filename_or_title):
     text_str = str(full_text)
@@ -106,7 +87,7 @@ def process_extracted_text(full_text, title, base_metadata=None):
     limit_total = 200000
     limited_text = text_str[:limit_total]
 
-    # 2. Merge Heuristics or Metadata from Trafilatura
+    # 2. Merge Heuristics
     metadata = extract_metadata_heuristics(limited_text, title)
     if base_metadata:
         for key, value in base_metadata.items():
@@ -129,44 +110,31 @@ def process_extracted_text(full_text, title, base_metadata=None):
 @app.route('/api/extract', methods=['POST'])
 def extract():
     try:
-        # HANDLING URL EXTRACTION (Browser-Like Fetching via Playwright)
+        # HANDLING URL EXTRACTION (Jina Reader Integration)
         if request.is_json:
             data = request.get_json()
             url = data.get('url')
             if not url:
                 return jsonify({"status": "error", "message": "No URL provided"}), 400
             
-            # Use Playwright instead of trafilatura.fetch_url for the initial download
-            html_source = fetch_with_playwright(url)
+            jina_data = fetch_with_jina(url)
             
-            if not html_source:
+            if not jina_data or not jina_data.get("content"):
                 return jsonify({
                     "status": "error", 
-                    "message": "Failed to bypass site protection. The target website is blocking automated access."
+                    "message": "The website could not be accessed. It might be heavily protected or offline."
                 }), 422
             
-            # Extract clean text from the Playwright HTML source
-            full_text = trafilatura.extract(html_source, include_comments=False, include_tables=True)
-            # Extract metadata from the Playwright HTML source
-            metadata_raw = trafilatura.extract_metadata(html_source)
+            full_text = jina_data["content"]
+            source_meta = {
+                "title": jina_data.get("title") or url,
+                "publisher": "" # Jina doesn't return publisher directly, heuristic will handle it
+            }
             
-            if not full_text:
-                return jsonify({"status": "error", "message": "Extraction succeeded but no readable text was found."}), 422
-
-            # Map Trafilatura metadata
-            source_meta = {}
-            if metadata_raw:
-                source_meta = {
-                    "title": metadata_raw.title,
-                    "authors": [metadata_raw.author] if metadata_raw.author else [],
-                    "year": metadata_raw.date[:4] if metadata_raw.date else "",
-                    "publisher": metadata_raw.sitename or metadata_raw.hostname or ""
-                }
-            
-            result_data = process_extracted_text(clean_text(full_text), source_meta.get("title") or url, source_meta)
+            result_data = process_extracted_text(clean_text(full_text), source_meta["title"], source_meta)
             return jsonify({"status": "success", "data": result_data})
 
-        # HANDLING FILE EXTRACTION (Remains unchanged for PDF/Office)
+        # HANDLING FILE EXTRACTION
         if 'file' not in request.files:
             return jsonify({"status": "error", "message": "No file part"}), 400
         

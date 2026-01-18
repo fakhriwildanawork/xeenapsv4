@@ -4,7 +4,3 @@ python-pptx
 python-docx
 openpyxl
 requests
-trafilatura
-lxml
-playwright
-playwright-stealth
