@@ -1,8 +1,7 @@
 
 /**
- * XEENAPS PKM - SECURE BACKEND V17
- * Delayed storage implementation: extraction only vs permanent saving.
- * Triple Threat Extraction: Native GAS -> ScrapingAnt Fallback.
+ * XEENAPS PKM - SECURE BACKEND V18
+ * Improved Triple Threat Extraction: Native GAS -> ScrapingAnt Fallback with detection.
  */
 
 const CONFIG = {
@@ -85,7 +84,7 @@ function doPost(e) {
           extractedText = extractTextContent(blob, mimeType);
         }
       } catch (err) {
-        extractedText = "Extraction failed: " + err.toString();
+        return createJsonResponse({ status: 'error', message: err.toString() });
       }
 
       return createJsonResponse({ 
@@ -106,13 +105,10 @@ function doPost(e) {
   }
 }
 
-/**
- * Helper to fetch ScrapingAnt API Key from Sheet
- */
 function getScrapingAntKey() {
   try {
     const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEETS.KEYS);
-    const sheet = ss.getSheetByName("Scarping");
+    const sheet = ss.getSheetByName("Scraping");
     if (!sheet) return null;
     return sheet.getRange("A1").getValue().toString().trim();
   } catch (e) {
@@ -121,17 +117,11 @@ function getScrapingAntKey() {
   }
 }
 
-/**
- * Parses Drive URL to extract File ID
- */
 function getFileIdFromUrl(url) {
   const match = url.match(/[-\w]{25,}/);
   return match ? match[0] : null;
 }
 
-/**
- * Main URL extraction router
- */
 function handleUrlExtraction(url) {
   const driveId = getFileIdFromUrl(url);
   
@@ -139,117 +129,84 @@ function handleUrlExtraction(url) {
     try {
       const fileMeta = Drive.Files.get(driveId);
       const mimeType = fileMeta.mimeType;
-      const size = parseInt(fileMeta.size || "0");
-      
       const isNative = mimeType.includes('google-apps');
-      if (!isNative && size > 25 * 1024 * 1024) {
-        throw new Error("File is too large (>25MB) for automatic scanning. Please fill metadata manually.");
-      }
-
       if (isNative) {
         if (mimeType.includes('document')) return DocumentApp.openById(driveId).getBody().getText();
-        if (mimeType.includes('spreadsheet')) {
-          return SpreadsheetApp.openById(driveId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
-        }
-        if (mimeType.includes('presentation')) {
-          return SlidesApp.openById(driveId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
-        }
+        if (mimeType.includes('spreadsheet')) return SpreadsheetApp.openById(driveId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
       }
-
       const blob = DriveApp.getFileById(driveId).getBlob();
       return extractTextContent(blob, mimeType);
     } catch (e) {
-      throw new Error("Google Drive access failed. Ensure the link is shared as 'Anyone with the link can view'. Detail: " + e.message);
+      throw new Error("Drive access denied: " + e.message);
     }
   }
 
-  // Regular Web Link Extraction
   let webText = "";
-  
+  let needsScrapingAnt = false;
+
   // 1. TRY NATIVE GAS FETCH
   try {
     const response = UrlFetchApp.fetch(url, { 
       muteHttpExceptions: true,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      }
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
     });
     
-    if (response.getResponseCode() === 200) {
-      const html = response.getContentText();
-      webText = html.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
-                   .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
-                   .replace(/<[^>]*>/g, " ")
-                   .replace(/\s+/g, " ")
-                   .trim();
+    const code = response.getResponseCode();
+    const content = response.getContentText();
+    
+    // Check if response is blocked
+    if (code === 403 || code === 401 || content.includes('Cloudflare') || content.includes('Access Denied') || content.length < 500) {
+      needsScrapingAnt = true;
+    } else {
+      webText = content.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
+                       .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
+                       .replace(/<[^>]*>/g, " ")
+                       .replace(/\s+/g, " ")
+                       .trim();
     }
   } catch (e) {
-    console.warn("Native GAS fetch failed for:", url, e.toString());
+    needsScrapingAnt = true;
   }
 
-  // 2. SCRAPINGANT FALLBACK (The Final Weapon)
-  // Only triggered if native fetch returned very little text or failed
-  if (webText.length < 500) {
+  // 2. SCRAPINGANT FALLBACK
+  if (needsScrapingAnt) {
     const antKey = getScrapingAntKey();
-    if (antKey) {
-      try {
-        const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${antKey}&browser=true`;
-        const antResponse = UrlFetchApp.fetch(antUrl, { muteHttpExceptions: true });
-        if (antResponse.getResponseCode() === 200) {
-          const antHtml = antResponse.getContentText();
-          webText = antHtml.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
+    if (!antKey) throw new Error("This site is protected and ScrapingAnt key is missing in your sheet.");
+    
+    try {
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${antKey}&browser=true`;
+      const antResponse = UrlFetchApp.fetch(antUrl, { muteHttpExceptions: true });
+      if (antResponse.getResponseCode() === 200) {
+        const antHtml = antResponse.getContentText();
+        webText = antHtml.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
                          .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
                          .replace(/<[^>]*>/g, " ")
                          .replace(/\s+/g, " ")
                          .trim();
-        }
-      } catch (antErr) {
-        console.error("ScrapingAnt failed:", antErr.toString());
+      } else {
+        throw new Error("ScrapingAnt also failed: " + antResponse.getContentText().substring(0, 100));
       }
+    } catch (antErr) {
+      throw new Error("Bypass failed: " + antErr.toString());
     }
   }
 
-  if (webText.length > 0) return webText;
-  throw new Error("Website fetch failed after multiple attempts.");
+  if (webText.length > 10) return webText;
+  throw new Error("Could not extract any content from this URL.");
 }
 
-/**
- * Ghost Extraction logic: Copy -> Convert -> Read -> Remove
- */
 function extractTextContent(blob, mimeType) {
   if (mimeType.includes('text/') || mimeType.includes('csv')) return blob.getDataAsString();
-
-  let targetMimeType = 'application/vnd.google-apps.document';
-  let appType = 'doc';
-  
-  if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) {
-    targetMimeType = 'application/vnd.google-apps.spreadsheet';
-    appType = 'sheet';
-  } else if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) {
-    targetMimeType = 'application/vnd.google-apps.presentation';
-    appType = 'slide';
-  }
-
-  const resource = { name: "Xeenaps_Temp_" + blob.getName(), mimeType: targetMimeType };
+  const resource = { name: "Xeenaps_Temp_" + blob.getName(), mimeType: 'application/vnd.google-apps.document' };
   let tempFileId = null;
-  
   try {
     const tempFile = Drive.Files.create(resource, blob);
     tempFileId = tempFile.id;
-    let text = "";
-
-    if (appType === 'doc') {
-      text = DocumentApp.openById(tempFileId).getBody().getText();
-    } else if (appType === 'sheet') {
-      text = SpreadsheetApp.openById(tempFileId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
-    } else if (appType === 'slide') {
-      text = SlidesApp.openById(tempFileId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
-    }
-    
-    Drive.Files.remove(tempFileId); // Hard delete
+    const text = DocumentApp.openById(tempFileId).getBody().getText();
+    Drive.Files.remove(tempFileId);
     return text;
   } catch (e) {
-    if (tempFileId) { try { Drive.Files.remove(tempFileId); } catch(i) {} }
+    if (tempFileId) try { Drive.Files.remove(tempFileId); } catch(i) {}
     throw new Error("Conversion failed: " + e.message);
   }
 }
@@ -290,7 +247,7 @@ function getDefaultModel(provider) {
 
 function handleAiRequest(provider, prompt, modelOverride) {
   const keys = (provider === 'groq') ? getKeysFromSheet('Groq', 2) : getKeysFromSheet('ApiKeys', 1);
-  if (!keys || keys.length === 0) return { status: 'error', message: 'No active API keys found in spreadsheet.' };
+  if (!keys || keys.length === 0) return { status: 'error', message: 'No active API keys found.' };
   const config = getProviderModel(provider);
   const model = modelOverride || config.model;
   let lastError = '';
@@ -300,16 +257,15 @@ function handleAiRequest(provider, prompt, modelOverride) {
       if (responseText) return { status: 'success', data: responseText };
     } catch (err) { lastError = err.toString(); }
   }
-  return { status: 'error', message: 'AI Request failed with all keys. Last error: ' + lastError };
+  return { status: 'error', message: 'AI failed: ' + lastError };
 }
 
 function callGroqApi(apiKey, model, prompt) {
   const url = "https://api.groq.com/openai/v1/chat/completions";
   const payload = {
     model: model,
-    messages: [{ role: "system", content: "Expert academic librarian. RAW JSON ONLY." }, { role: "user", content: prompt }],
+    messages: [{ role: "system", content: "Academic librarian. RAW JSON ONLY." }, { role: "user", content: prompt }],
     temperature: 0.1,
-    max_tokens: 1500,
     response_format: { type: "json_object" }
   };
   const res = UrlFetchApp.fetch(url, { method: "post", contentType: "application/json", headers: { "Authorization": "Bearer " + apiKey }, payload: JSON.stringify(payload), muteHttpExceptions: true });
@@ -360,10 +316,7 @@ function getAllItems(ssId, sheetName) {
 function saveToSheet(ssId, sheetName, item) {
   const ss = SpreadsheetApp.openById(ssId);
   let sheet = ss.getSheetByName(sheetName);
-  if (!sheet) {
-    setupDatabase();
-    sheet = ss.getSheetByName(sheetName);
-  }
+  if (!sheet) { setupDatabase(); sheet = ss.getSheetByName(sheetName); }
   const headers = CONFIG.SCHEMAS.LIBRARY;
   const rowData = headers.map(h => {
     const val = item[h];
@@ -378,10 +331,7 @@ function deleteFromSheet(ssId, sheetName, id) {
   if (!sheet) return;
   const data = sheet.getDataRange().getValues();
   for (let i = 1; i < data.length; i++) {
-    if (data[i][0] === id) {
-      sheet.deleteRow(i + 1);
-      break;
-    }
+    if (data[i][0] === id) { sheet.deleteRow(i + 1); break; }
   }
 }
 
