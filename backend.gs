@@ -1,7 +1,8 @@
 
 /**
- * XEENAPS PKM - SECURE BACKEND V25 (STABLE & SMART METADATA)
- * Consolidated Extraction with Metadata Injection for better AI Analysis.
+ * XEENAPS PKM - SECURE BACKEND V27 (2-TIER WEB EXTRACTION)
+ * Consolidated Extraction with Metadata Injection.
+ * Logic: 1. Google Native -> 2. Simple Fetch (Full Data) -> 3. ScrapingAnt (Bypass)
  */
 
 const CONFIG = {
@@ -79,7 +80,6 @@ function doPost(e) {
         } else if (body.fileData) {
           const mimeType = body.mimeType || 'application/octet-stream';
           const blob = Utilities.newBlob(Utilities.base64Decode(body.fileData), mimeType, fileName);
-          // Prepend filename to help AI identify title
           extractedText = `FILE_NAME: ${fileName}\n\n` + extractTextContent(blob, mimeType);
         }
       } catch (err) {
@@ -110,19 +110,18 @@ function getFileIdFromUrl(url) {
 }
 
 /**
- * Enhanced URL Extraction (V25: Metadata Injection Enabled)
+ * Enhanced 2-Tier URL Extraction
  */
 function handleUrlExtraction(url) {
   const driveId = getFileIdFromUrl(url);
   
-  // 1. Google Drive Handler (Metadata Aware)
-  if (driveId && url.includes('drive.google.com')) {
+  // 1. Google Drive / Docs Handler (Native Access)
+  if (driveId && (url.includes('drive.google.com') || url.includes('docs.google.com'))) {
     try {
       const fileMeta = Drive.Files.get(driveId);
       const mimeType = fileMeta.mimeType;
       const isNative = mimeType.includes('google-apps');
       
-      // Inject File System Metadata for AI
       let systemMetaPrefix = `DOCUMENT_TITLE: ${fileMeta.name}\n`;
       if (fileMeta.owners && fileMeta.owners.length > 0) {
         systemMetaPrefix += `AUTHOR_NAME: ${fileMeta.owners[0].displayName}\n`;
@@ -131,81 +130,81 @@ function handleUrlExtraction(url) {
 
       let rawContent = "";
       if (isNative) {
-        if (mimeType.includes('document')) rawContent = DocumentApp.openById(driveId).getBody().getText();
-        if (mimeType.includes('spreadsheet')) rawContent = SpreadsheetApp.openById(driveId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
-        if (mimeType.includes('presentation')) rawContent = SlidesApp.openById(driveId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
+        if (mimeType.includes('document')) {
+          rawContent = DocumentApp.openById(driveId).getBody().getText();
+        } else if (mimeType.includes('spreadsheet')) {
+          rawContent = SpreadsheetApp.openById(driveId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
+        } else if (mimeType.includes('presentation')) {
+          rawContent = SlidesApp.openById(driveId).getSlides().map(s => s.getShapes().map(sh => { 
+            try { return sh.getText().asString(); } catch(e) { return ""; } 
+          }).join(" ")).join("\n");
+        }
       } else {
         const blob = DriveApp.getFileById(driveId).getBlob();
         rawContent = extractTextContent(blob, mimeType);
       }
       
-      return systemMetaPrefix + rawContent;
+      if (rawContent.trim().length > 10) {
+        return systemMetaPrefix + rawContent;
+      }
     } catch (e) {
-      throw new Error("Drive access failed: " + e.message);
+      console.log("Drive access failed: " + e.message);
     }
   }
 
-  // 2. Web URL Handler - Stage 1: Jina Reader (Title Injected)
-  const jinaContent = fetchWithJina(url);
-  if (jinaContent && jinaContent.length > 500) return jinaContent;
+  // 2. LAPIS 1: Simple Fetch (UrlFetchApp) - Gratis & Lengkap
+  let simpleHtml = "";
+  try {
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+    simpleHtml = response.getContentText();
+    const responseCode = response.getResponseCode();
+    
+    // Check if content is valid (not blocked, reasonable length)
+    if (responseCode === 200 && !isBlocked(simpleHtml)) {
+      const cleanText = cleanHtml(simpleHtml);
+      if (cleanText.length > 800) {
+        return extractWebMetadata(simpleHtml) + "\n\n" + cleanText;
+      }
+    }
+  } catch (e) {
+    console.log("Lapis 1 failed: " + e.message);
+  }
 
-  // 3. Web URL Handler - Stage 2: ScrapingAnt Bypass (HTML Metadata Aware)
+  // 3. LAPIS 2: ScrapingAnt Bypass - Digunakan hanya jika Lapis 1 gagal
   const antKey = getScrapingAntKey();
   if (antKey) {
     try {
       const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${antKey}&browser=true&proxy_type=residential`;
       const response = UrlFetchApp.fetch(antUrl, { muteHttpExceptions: true });
       const html = response.getContentText();
-      if (response.getResponseCode() === 200 && !isBlocked(html)) {
+      if (response.getResponseCode() === 200) {
         return extractWebMetadata(html) + "\n\n" + cleanHtml(html);
       }
-    } catch (e) {}
+    } catch (e) {
+      console.log("Lapis 2 failed: " + e.message);
+    }
   }
 
-  // 4. Web URL Handler - Fallback: Simple Fetch
-  try {
-    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    const html = response.getContentText();
-    return extractWebMetadata(html) + "\n\n" + cleanHtml(html);
-  } catch (e) {
-    throw new Error("Website fetch failed: " + e.message);
+  // Final fallback: jika minimal ada teks yang didapat dari Lapis 1
+  if (simpleHtml) {
+    const lastResortText = cleanHtml(simpleHtml);
+    if (lastResortText.length > 300) {
+      return extractWebMetadata(simpleHtml) + "\n\n" + lastResortText;
+    }
   }
+
+  throw new Error("Website extraction failed. The site might be highly protected.");
 }
 
-/**
- * Extract Title and Author from HTML raw string to assist AI
- */
 function extractWebMetadata(html) {
   let metaInfo = "";
-  
-  // Extract Title
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   if (titleMatch) metaInfo += `WEBSITE_TITLE: ${titleMatch[1].trim()}\n`;
-
-  // Extract Meta Author
   const authorMatch = html.match(/<meta[^>]*name=["']author["'][^>]*content=["']([^"']+)["']/i);
   if (authorMatch) metaInfo += `WEBSITE_AUTHOR: ${authorMatch[1].trim()}\n`;
-
-  // Extract Meta Publisher / Site Name
   const siteMatch = html.match(/<meta[^>]*property=["']og:site_name["'][^>]*content=["']([^"']+)["']/i);
   if (siteMatch) metaInfo += `WEBSITE_PUBLISHER: ${siteMatch[1].trim()}\n`;
-
   return metaInfo;
-}
-
-function fetchWithJina(url) {
-  try {
-    const response = UrlFetchApp.fetch("https://r.jina.ai/" + url, { muteHttpExceptions: true, headers: { "Accept": "application/json" } });
-    if (response.getResponseCode() === 200) {
-      const json = JSON.parse(response.getContentText());
-      const title = json.data?.title || "";
-      const content = json.data?.content || "";
-      if (!isBlocked(content)) {
-        return `TITLE: ${title}\nSOURCE: ${url}\n\n${content}`;
-      }
-    }
-  } catch (e) {}
-  return null;
 }
 
 function isBlocked(text) {
@@ -231,15 +230,10 @@ function getScrapingAntKey() {
   } catch (e) { return null; }
 }
 
-/**
- * Ghost Extraction logic (V25)
- */
 function extractTextContent(blob, mimeType) {
   if (mimeType.includes('text/') || mimeType.includes('csv')) return blob.getDataAsString();
-
   let targetMimeType = 'application/vnd.google-apps.document';
   let appType = 'doc';
-  
   if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) {
     targetMimeType = 'application/vnd.google-apps.spreadsheet';
     appType = 'sheet';
@@ -247,15 +241,12 @@ function extractTextContent(blob, mimeType) {
     targetMimeType = 'application/vnd.google-apps.presentation';
     appType = 'slide';
   }
-
   const resource = { name: "Xeenaps_Ghost_" + Utilities.getUuid(), mimeType: targetMimeType };
   let tempFileId = null;
-  
   try {
     const tempFile = Drive.Files.create(resource, blob);
     tempFileId = tempFile.id;
     let text = "";
-
     if (appType === 'doc') {
       text = DocumentApp.openById(tempFileId).getBody().getText();
     } else if (appType === 'sheet') {
@@ -263,7 +254,6 @@ function extractTextContent(blob, mimeType) {
     } else if (appType === 'slide') {
       text = SlidesApp.openById(tempFileId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
     }
-    
     Drive.Files.remove(tempFileId); 
     return text;
   } catch (e) {

@@ -3,16 +3,16 @@ import { LibraryItem } from "../types";
 import { callAiProxy } from "./gasService";
 
 /**
- * AddCollectionService - Metadata Extraction via AI Proxy.
- * FOCUS: Basic metadata, robust citations, keywords, and labels.
- * EXCLUDE: Deep insights (abstract, summary, methodology, etc.)
+ * AddCollectionService - Metadata Extraction via AI Proxy (GROQ).
+ * FOCUS: Basic metadata, robust citations, keywords, and labels from raw text.
  */
 export const extractMetadataWithAI = async (textSnippet: string): Promise<Partial<LibraryItem>> => {
   try {
-    const truncatedSnippet = textSnippet.substring(0, 7500);
+    // Increased snippet slightly to 8500 to handle noisier raw HTML data better
+    const truncatedSnippet = textSnippet.substring(0, 8500);
 
     const prompt = `ACT AS AN EXPERT SENIOR ACADEMIC LIBRARIAN. 
-    EXTRACT DATA FROM THE PROVIDED PDF TEXT AND RETURN IN RAW JSON FORMAT ONLY.
+    EXTRACT DATA FROM THE PROVIDED TEXT AND RETURN IN RAW JSON FORMAT ONLY.
 
     SCOPE LIMITATION (CRITICAL):
     - ANALYZE ONLY: title, topic, subTopic, authors, publisher, year, keywords, labels, and all 6 citation fields.
@@ -22,7 +22,7 @@ export const extractMetadataWithAI = async (textSnippet: string): Promise<Partia
     1. COMPLETE FIELDS (NO TRUNCATION):
        - "title": Full, official academic title.
        - "authors": List of all full names found.
-       - "publisher": MANDATORY. Identify ACCURATELY the complete Publisher Name Fisrt, if publsisher is not found then Identify ACCURATELY the complete Journal Name, and if none of them are found then get more likely string to be catch as a publisher . DO NOT use "Not Specified", "N/A", or "Unknown". Look carefully at the entire document given, THEN ANALYZE AND FIND THE MOST ACCURATE PUBLISHER NAME.
+       - "publisher": MANDATORY. Identify ACCURATELY the complete Publisher Name First. If publisher is not found then Identify ACCURATELY the complete Journal Name. Look carefully at the entire snippet.
        - "bibAPA", "bibHarvard", "bibChicago": COMPLETE bibliographic entries. Include full titles, full journal names, volume, issue, page ranges, and DOI. NEVER shorten.
     
     2. CONCISE FIELDS:
@@ -30,7 +30,7 @@ export const extractMetadataWithAI = async (textSnippet: string): Promise<Partia
        - "subTopic": Exactly 2 words describing the specific niche.
        - "keywords": Exactly 5 relevant academic keywords extracted from content.
        - "labels": Exactly 3 thematic labels extracted from content.
-       - "year": Accurately identify the exact year of publication from the source. If none of source provide year of publication, return empty
+       - "year": Accurately identify the exact year of publication from the source.
 
     3. STYLE COMPLIANCE: 
        - inTextAPA: (Author, Year)
@@ -51,14 +51,15 @@ export const extractMetadataWithAI = async (textSnippet: string): Promise<Partia
       "inTextAPA": "...",
       "inTextHarvard": "...",
       "inTextChicago": "...",
-      "bibAPA": "COMPLETE APA 7th Edition Entry",
-      "bibHarvard": "COMPLETE Harvard Entry",
-      "bibChicago": "COMPLETE Chicago Entry"
+      "bibAPA": "...",
+      "bibHarvard": "...",
+      "bibChicago": "..."
     }
 
-    TEXT SNIPPET TO ANALYZE:
+    TEXT SNIPPET TO ANALYZE (MIGHT BE RAW DATA):
     ${truncatedSnippet}`;
 
+    // Always using GROQ as requested for this initial analysis
     const response = await callAiProxy('groq', prompt);
     if (!response) return {};
     
@@ -71,7 +72,6 @@ export const extractMetadataWithAI = async (textSnippet: string): Promise<Partia
 
     try {
       const parsed = JSON.parse(cleanJson);
-      // Filter out empty values
       return Object.fromEntries(Object.entries(parsed).filter(([_, v]) => v != null && v !== ""));
     } catch (e) {
       console.error('JSON Parse Error:', e);
