@@ -1,7 +1,6 @@
 import io
 import re
 import requests
-import random
 from pypdf import PdfReader
 from pptx import Presentation
 from docx import Document
@@ -13,6 +12,12 @@ app = Flask(__name__)
 # Set max content length to 25MB
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+]
+
 def clean_text(text):
     if not text:
         return ""
@@ -21,38 +26,55 @@ def clean_text(text):
     if not isinstance(text, str):
         text = str(text)
     
+    # Remove HTML tags if any (basic fallback)
+    text = re.sub(r'<script\b[^>]*>([\s\S]*?)</script>', '', text, flags=re.I)
+    text = re.sub(r'<style\b[^>]*>([\s\S]*?)</style>', '', text, flags=re.I)
+    text = re.sub(r'<[^>]*>', ' ', text)
+    
     # Clean weird spacing and extra newlines
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 def fetch_with_jina(url):
-    """
-    Uses Jina Reader (r.jina.ai) to fetch and render the URL.
-    This handles JS rendering, bypasses bot protection, and returns clean Markdown.
-    """
+    """Primary method: Jina Reader for clean Markdown."""
     jina_url = f"https://r.jina.ai/{url}"
     try:
-        # We use a standard requests call because Jina handles the browser work
         headers = {
             "Accept": "application/json",
-            "X-With-Generated-Alt": "true" # Optional: gets better descriptions of images
+            "X-With-Generated-Alt": "true"
         }
-        response = requests.get(jina_url, headers=headers, timeout=30)
-        
+        response = requests.get(jina_url, headers=headers, timeout=15)
         if response.status_code == 200:
             json_data = response.json()
-            # Jina returns structured data: title, content (markdown), description, etc.
-            return {
-                "content": json_data.get("data", {}).get("content", ""),
-                "title": json_data.get("data", {}).get("title", ""),
-                "description": json_data.get("data", {}).get("description", "")
-            }
-        else:
-            print(f"Jina Error: {response.status_code} - {response.text}")
-            return None
+            data = json_data.get("data", {})
+            if data and data.get("content"):
+                return {
+                    "content": data.get("content", ""),
+                    "title": data.get("title", ""),
+                    "description": data.get("description", "")
+                }
     except Exception as e:
-        print(f"Jina Fetch Exception: {str(e)}")
-        return None
+        print(f"Jina error for {url}: {str(e)}")
+    return None
+
+def fetch_direct_fallback(url):
+    """Fallback method: Direct fetch with browser headers."""
+    try:
+        headers = {
+            "User-Agent": USER_AGENTS[0],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+        if response.status_code == 200:
+            return {
+                "content": response.text,
+                "title": url,
+                "description": ""
+            }
+    except Exception as e:
+        print(f"Direct fallback error for {url}: {str(e)}")
+    return None
 
 def extract_metadata_heuristics(full_text, filename_or_title):
     text_str = str(full_text)
@@ -66,12 +88,10 @@ def extract_metadata_heuristics(full_text, filename_or_title):
         "type": "Literature"
     }
 
-    # Extract Year
     year_match = re.search(r'\b(19|20)\d{2}\b', text_str[:5000])
     if year_match:
         metadata["year"] = year_match.group(0)
 
-    # Simple Publisher Heuristics
     publishers = ["Elsevier", "Springer", "IEEE", "MDPI", "Nature", "Science", "Wiley", "Taylor & Francis", "ACM", "Frontiers", "Sage", "Medium", "BBC", "CNN", "Wikipedia"]
     for pub in publishers:
         if pub.lower() in text_str[:10000].lower():
@@ -81,60 +101,59 @@ def extract_metadata_heuristics(full_text, filename_or_title):
     return metadata
 
 def process_extracted_text(full_text, title, base_metadata=None):
-    text_str = str(full_text)
-    
-    # 1. Limit total text (200,000 chars) for performance
+    # Sanitize and limit
+    cleaned = clean_text(full_text)
     limit_total = 200000
-    limited_text = text_str[:limit_total]
+    limited_text = cleaned[:limit_total]
 
-    # 2. Merge Heuristics
     metadata = extract_metadata_heuristics(limited_text, title)
     if base_metadata:
         for key, value in base_metadata.items():
-            if value:
-                metadata[key] = value
+            if value: metadata[key] = value
     
-    # 3. Snippet for AI (Groq/Gemini)
     ai_snippet = limited_text[:7500]
-    
-    # 4. Split text into chunks
     chunk_size = 20000
     chunks = [limited_text[i:i+chunk_size] for i in range(0, len(limited_text), chunk_size)][:10]
 
     return {
         **metadata,
         "aiSnippet": ai_snippet,
-        "chunks": chunks
+        "chunks": chunks,
+        "fullText": limited_text
     }
 
 @app.route('/api/extract', methods=['POST'])
 def extract():
     try:
-        # HANDLING URL EXTRACTION (Jina Reader Integration)
+        # URL EXTRACTION
         if request.is_json:
             data = request.get_json()
-            url = data.get('url')
+            url = data.get('url', '').strip()
             if not url:
                 return jsonify({"status": "error", "message": "No URL provided"}), 400
             
-            jina_data = fetch_with_jina(url)
+            # 1. Try Jina
+            extracted_data = fetch_with_jina(url)
             
-            if not jina_data or not jina_data.get("content"):
+            # 2. If Jina fails, try Direct Fetch
+            if not extracted_data:
+                print(f"Jina failed for {url}, trying direct fallback...")
+                extracted_data = fetch_direct_fallback(url)
+            
+            if not extracted_data or not extracted_data.get("content"):
                 return jsonify({
                     "status": "error", 
-                    "message": "The website could not be accessed. It might be heavily protected or offline."
+                    "message": "Access Denied: This website is heavily protected or blocking our scrapers. Try downloading the page as PDF and upload it instead."
                 }), 422
             
-            full_text = jina_data["content"]
-            source_meta = {
-                "title": jina_data.get("title") or url,
-                "publisher": "" # Jina doesn't return publisher directly, heuristic will handle it
-            }
-            
-            result_data = process_extracted_text(clean_text(full_text), source_meta["title"], source_meta)
+            result_data = process_extracted_text(
+                extracted_data["content"], 
+                extracted_data.get("title") or url,
+                {"publisher": ""}
+            )
             return jsonify({"status": "success", "data": result_data})
 
-        # HANDLING FILE EXTRACTION
+        # FILE EXTRACTION
         if 'file' not in request.files:
             return jsonify({"status": "error", "message": "No file part"}), 400
         
@@ -168,16 +187,17 @@ def extract():
         elif filename_lower.endswith(('.txt', '.md', '.csv')):
             full_text = file_bytes.decode('utf-8', errors='ignore')
         else:
-            return jsonify({"status": "error", "message": "Unsupported file format."}), 400
+            return jsonify({"status": "error", "message": f"Format {filename_lower} is not supported yet."}), 400
 
         if not full_text.strip():
-            return jsonify({"status": "error", "message": "Document is empty."}), 422
+            return jsonify({"status": "error", "message": "The file seems to be empty or contains only images/scans."}), 422
 
-        result_data = process_extracted_text(clean_text(full_text), file.filename)
+        result_data = process_extracted_text(full_text, file.filename)
         return jsonify({"status": "success", "data": result_data})
         
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
+        print(f"Main extraction error: {str(e)}")
+        return jsonify({"status": "error", "message": f"Extraction Server Error: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(port=5000)
