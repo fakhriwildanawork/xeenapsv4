@@ -1,7 +1,7 @@
 
 /**
- * XEENAPS PKM - SECURE BACKEND V20
- * Strict Cascading Extraction: Native GAS -> ScrapingAnt.
+ * XEENAPS PKM - SECURE BACKEND V23 (CONSOLIDATED EDITION)
+ * 100% GAS Powered: Handles URLs (Jina/Ant) and Files (Ghost Extraction).
  */
 
 const CONFIG = {
@@ -97,21 +97,58 @@ function doPost(e) {
   }
 }
 
-function isBlocked(text) {
-  if (!text || text.length < 350) return true; // Stricter length check
-  const blockedKeywords = [
-    "access denied", "cloudflare", "security check", "forbidden", 
-    "please enable cookies", "checking your browser", "robot",
-    "captcha", "403 forbidden", "403 error", "bot detection",
-    "not authorized", "limit reached", "Taylor & Francis Online: Access Denied",
-    "standard terms and conditions", "wait a moment", "verify you are a human",
-    "one more step", "browser security"
-  ];
-  const textLower = text.toLowerCase();
-  return blockedKeywords.some(keyword => textLower.includes(keyword.toLowerCase()));
+/**
+ * CORE EXTRACTION: Ghost Method (Convert -> Read -> Delete)
+ */
+function extractTextContent(blob, mimeType) {
+  // 1. Basic Text Files
+  if (mimeType.includes('text/') || mimeType.includes('csv') || mimeType.includes('markdown')) {
+    return blob.getDataAsString();
+  }
+
+  // 2. Ghost Conversion (PDF, Word, Excel, PPT)
+  let targetMimeType = 'application/vnd.google-apps.document';
+  let appType = 'doc';
+  
+  if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) {
+    targetMimeType = 'application/vnd.google-apps.spreadsheet';
+    appType = 'sheet';
+  } else if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) {
+    targetMimeType = 'application/vnd.google-apps.presentation';
+    appType = 'slide';
+  }
+
+  const resource = { name: "Xeenaps_Ghost_" + Utilities.getUuid(), mimeType: targetMimeType };
+  let tempFileId = null;
+  
+  try {
+    // Stage 1: Convert to Google Workspace format
+    const tempFile = Drive.Files.create(resource, blob);
+    tempFileId = tempFile.id;
+    let text = "";
+
+    // Stage 2: Read text based on app type
+    if (appType === 'doc') {
+      text = DocumentApp.openById(tempFileId).getBody().getText();
+    } else if (appType === 'sheet') {
+      text = SpreadsheetApp.openById(tempFileId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
+    } else if (appType === 'slide') {
+      text = SlidesApp.openById(tempFileId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
+    }
+    
+    return text;
+  } catch (e) {
+    throw new Error("Conversion failed: " + e.message);
+  } finally {
+    // Stage 3: Permanent Clean up
+    if (tempFileId) {
+      try { Drive.Files.remove(tempFileId); } catch(i) {}
+    }
+  }
 }
 
 function handleUrlExtraction(url) {
+  // 0. Handle Google Drive
   const driveId = getFileIdFromUrl(url);
   if (driveId && url.includes('drive.google.com')) {
     try {
@@ -120,66 +157,59 @@ function handleUrlExtraction(url) {
       if (mimeType.includes('google-apps')) {
         if (mimeType.includes('document')) return DocumentApp.openById(driveId).getBody().getText();
         if (mimeType.includes('spreadsheet')) return SpreadsheetApp.openById(driveId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
+        if (mimeType.includes('presentation')) return SlidesApp.openById(driveId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
       }
       return extractTextContent(DriveApp.getFileById(driveId).getBlob(), mimeType);
     } catch (e) { throw new Error("Drive access denied: " + e.message); }
   }
 
-  let webText = "";
-  let needsScrapingAnt = false;
+  // 1. Stage 1: Jina Reader
+  const jinaContent = fetchWithJina(url);
+  if (jinaContent && jinaContent.length > 500) return jinaContent;
 
-  // 1. NATIVE GAS FETCH
+  // 2. Stage 2: ScrapingAnt Bypass
+  const antKey = getScrapingAntKey();
+  if (!antKey) throw new Error("Jina failed and ScrapingAnt Key is not configured.");
+  
   try {
-    const response = UrlFetchApp.fetch(url, { 
-      muteHttpExceptions: true,
-      headers: { 
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.google.com/"
-      }
-    });
-    
-    const code = response.getResponseCode();
-    const content = response.getContentText();
-    
-    if (code !== 200 || isBlocked(content)) {
-      needsScrapingAnt = true;
-    } else {
-      webText = cleanHtml(content);
-      if (webText.length < 300) needsScrapingAnt = true; // Fallback if cleaned text is too short
-    }
-  } catch (e) { needsScrapingAnt = true; }
+    const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${antKey}&browser=true&proxy_type=residential`;
+    const response = UrlFetchApp.fetch(antUrl, { muteHttpExceptions: true });
+    if (response.getResponseCode() !== 200) throw new Error("Bypass Server Error (" + response.getResponseCode() + ")");
 
-  // 2. SCRAPINGANT FALLBACK
-  if (needsScrapingAnt) {
-    const antKey = getScrapingAntKey();
-    if (!antKey) throw new Error("PROTECTED: ScrapingAnt key missing.");
-    
-    try {
-      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${antKey}&browser=true&proxy_type=residential`;
-      const antResponse = UrlFetchApp.fetch(antUrl, { muteHttpExceptions: true });
-      if (antResponse.getResponseCode() === 200) {
-        const antHtml = antResponse.getContentText();
-        if (isBlocked(antHtml)) throw new Error("BYPASS_FAILED: Content still blocked after proxy.");
-        webText = cleanHtml(antHtml);
-        if (webText.length < 300) throw new Error("BYPASS_FAILED: Extracted text insufficient.");
-      } else {
-        throw new Error("BYPASS_FAILED: HTTP " + antResponse.getResponseCode());
-      }
-    } catch (antErr) { 
-      throw new Error(antErr.message || "Final bypass method failed.");
-    }
+    const html = response.getContentText();
+    if (isBlocked(html)) throw new Error("Target site blocked the bypass attempt.");
+
+    const cleaned = html.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
+                        .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
+                        .replace(/<[^>]*>/g, " ")
+                        .replace(/\s+/g, " ")
+                        .trim();
+
+    if (cleaned.length < 350) throw new Error("Insufficient content returned from bypass.");
+    return cleaned;
+  } catch (err) {
+    throw new Error(err.message || "All extraction methods failed.");
   }
-
-  return webText;
 }
 
-function cleanHtml(html) {
-  return html.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
-             .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
-             .replace(/<[^>]*>/g, " ")
-             .replace(/\s+/g, " ")
-             .trim();
+function fetchWithJina(url) {
+  try {
+    const jinaUrl = "https://r.jina.ai/" + url;
+    const response = UrlFetchApp.fetch(jinaUrl, { muteHttpExceptions: true, headers: { "Accept": "application/json" } });
+    if (response.getResponseCode() === 200) {
+      const json = JSON.parse(response.getContentText());
+      const content = json.data?.content || "";
+      if (!isBlocked(content)) return content;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function isBlocked(text) {
+  if (!text || text.length < 350) return true;
+  const blockedKeywords = ["access denied", "cloudflare", "security check", "forbidden", "please enable cookies", "captcha", "bot detection"];
+  const textLower = text.toLowerCase();
+  return blockedKeywords.some(keyword => textLower.includes(keyword.toLowerCase()));
 }
 
 function getScrapingAntKey() {
@@ -193,22 +223,6 @@ function getScrapingAntKey() {
 function getFileIdFromUrl(url) {
   const match = url.match(/[-\w]{25,}/);
   return match ? match[0] : null;
-}
-
-function extractTextContent(blob, mimeType) {
-  if (mimeType.includes('text/') || mimeType.includes('csv')) return blob.getDataAsString();
-  const resource = { name: "Xeenaps_Temp_" + blob.getName(), mimeType: 'application/vnd.google-apps.document' };
-  let tempFileId = null;
-  try {
-    const tempFile = Drive.Files.create(resource, blob);
-    tempFileId = tempFile.id;
-    const text = DocumentApp.openById(tempFileId).getBody().getText();
-    Drive.Files.remove(tempFileId);
-    return text;
-  } catch (e) {
-    if (tempFileId) try { Drive.Files.remove(tempFileId); } catch(i) {}
-    throw new Error("Conversion failed: " + e.message);
-  }
 }
 
 function setupDatabase() {
@@ -245,35 +259,30 @@ function getDefaultModel(provider) {
 
 function handleAiRequest(provider, prompt, modelOverride) {
   const keys = (provider === 'groq') ? getKeysFromSheet('Groq', 2) : getKeysFromSheet('ApiKeys', 1);
-  if (!keys || keys.length === 0) return { status: 'error', message: 'No active API keys found.' };
+  if (!keys || keys.length === 0) return { status: 'error', message: 'No API keys.' };
   const config = getProviderModel(provider);
   const model = modelOverride || config.model;
-  let lastError = '';
   for (let i = 0; i < keys.length; i++) {
     try {
       let responseText = (provider === 'groq') ? callGroqApi(keys[i], model, prompt) : callGeminiApi(keys[i], model, prompt);
       if (responseText) return { status: 'success', data: responseText };
-    } catch (err) { lastError = err.toString(); }
+    } catch (err) {}
   }
-  return { status: 'error', message: 'AI failed: ' + lastError };
+  return { status: 'error', message: 'AI failed.' };
 }
 
 function callGroqApi(apiKey, model, prompt) {
   const url = "https://api.groq.com/openai/v1/chat/completions";
-  const payload = { model: model, messages: [{ role: "system", content: "Academic librarian. RAW JSON ONLY." }, { role: "user", content: prompt }], temperature: 0.1, response_format: { type: "json_object" } };
+  const payload = { model: model, messages: [{ role: "system", content: "Academic librarian. JSON." }, { role: "user", content: prompt }], temperature: 0.1, response_format: { type: "json_object" } };
   const res = UrlFetchApp.fetch(url, { method: "post", contentType: "application/json", headers: { "Authorization": "Bearer " + apiKey }, payload: JSON.stringify(payload), muteHttpExceptions: true });
-  const json = JSON.parse(res.getContentText());
-  if (json.error) throw new Error(json.error.message);
-  return json.choices[0].message.content;
+  return JSON.parse(res.getContentText()).choices[0].message.content;
 }
 
 function callGeminiApi(apiKey, model, prompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const payload = { contents: [{ parts: [{ text: prompt }] }] };
   const res = UrlFetchApp.fetch(url, { method: "post", contentType: "application/json", payload: JSON.stringify(payload), muteHttpExceptions: true });
-  const json = JSON.parse(res.getContentText());
-  if (json.error) throw new Error(json.error.message);
-  return json.candidates[0].content.parts[0].text;
+  return JSON.parse(res.getContentText()).candidates[0].content.parts[0].text;
 }
 
 function getKeysFromSheet(sheetName, colIndex) {
@@ -297,9 +306,7 @@ function getAllItems(ssId, sheetName) {
     let item = {};
     headers.forEach((h, i) => {
       let val = row[i];
-      if (['tags', 'authors', 'keywords', 'labels'].includes(h)) {
-        try { val = JSON.parse(row[i] || '[]'); } catch(e) { val = []; }
-      }
+      if (['tags', 'authors', 'keywords', 'labels'].includes(h)) { try { val = JSON.parse(row[i] || '[]'); } catch(e) { val = []; } }
       item[h] = val;
     });
     return item;

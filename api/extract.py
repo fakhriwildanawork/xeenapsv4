@@ -1,7 +1,6 @@
 
 import io
 import re
-import requests
 from pypdf import PdfReader
 from pptx import Presentation
 from docx import Document
@@ -12,25 +11,6 @@ app = Flask(__name__)
 
 # Set max content length to 25MB
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
-
-def is_blocked_content(text):
-    """Detects if the extracted text is actually an 'Access Denied' or protection page."""
-    if not text or len(text) < 300: # Usually error pages are short
-        return True
-    
-    blocked_keywords = [
-        "access denied", "cloudflare", "security check", "forbidden", 
-        "please enable cookies", "checking your browser", "robot",
-        "captcha", "403 forbidden", "403 error", "bot detection",
-        "not authorized", "limit reached", "Taylor & Francis Online: Access Denied",
-        "verify you are a human", "wait a moment", "standard terms and conditions"
-    ]
-    
-    text_lower = text.lower()
-    for keyword in blocked_keywords:
-        if keyword.lower() in text_lower:
-            return True
-    return False
 
 def clean_text(text):
     if not text:
@@ -50,38 +30,10 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def fetch_with_jina(url):
-    """Method 1: Jina Reader for clean Markdown (No API Key)."""
-    jina_url = f"https://r.jina.ai/{url}"
-    try:
-        headers = {
-            "Accept": "application/json"
-        }
-        response = requests.get(jina_url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            json_data = response.json()
-            data = json_data.get("data", {})
-            content = data.get("content", "")
-            
-            # CRITICAL: Verify if content is actually blocked
-            if is_blocked_content(content):
-                print(f"Jina returned blocked content for {url}")
-                return None
-
-            if content:
-                return {
-                    "content": content,
-                    "title": data.get("title", ""),
-                    "description": data.get("description", "")
-                }
-    except Exception as e:
-        print(f"Jina error for {url}: {str(e)}")
-    return None
-
-def extract_metadata_heuristics(full_text, filename_or_title):
+def extract_metadata_heuristics(full_text, filename):
     text_str = str(full_text)
     metadata = {
-        "title": filename_or_title.rsplit('.', 1)[0].replace("_", " ") if '.' in filename_or_title else filename_or_title,
+        "title": filename.rsplit('.', 1)[0].replace("_", " ") if '.' in filename else filename,
         "authors": [],
         "year": "",
         "publisher": "",
@@ -94,7 +46,7 @@ def extract_metadata_heuristics(full_text, filename_or_title):
     if year_match:
         metadata["year"] = year_match.group(0)
 
-    publishers = ["Elsevier", "Springer", "IEEE", "MDPI", "Nature", "Science", "Wiley", "Taylor & Francis", "ACM", "Frontiers", "Sage", "Medium", "BBC", "CNN", "Wikipedia"]
+    publishers = ["Elsevier", "Springer", "IEEE", "MDPI", "Nature", "Science", "Wiley", "Taylor & Francis", "ACM", "Frontiers", "Sage", "MDPI"]
     for pub in publishers:
         if pub.lower() in text_str[:10000].lower():
             metadata["publisher"] = pub
@@ -102,16 +54,12 @@ def extract_metadata_heuristics(full_text, filename_or_title):
 
     return metadata
 
-def process_extracted_text(full_text, title, base_metadata=None):
-    # Sanitize and limit
+def process_extracted_text(full_text, title):
     cleaned = clean_text(full_text)
     limit_total = 200000
     limited_text = cleaned[:limit_total]
 
     metadata = extract_metadata_heuristics(limited_text, title)
-    if base_metadata:
-        for key, value in base_metadata.items():
-            if value: metadata[key] = value
     
     ai_snippet = limited_text[:7500]
     chunk_size = 20000
@@ -127,30 +75,6 @@ def process_extracted_text(full_text, title, base_metadata=None):
 @app.route('/api/extract', methods=['POST'])
 def extract():
     try:
-        # URL EXTRACTION
-        if request.is_json:
-            data = request.get_json()
-            url = data.get('url', '').strip()
-            if not url:
-                return jsonify({"status": "error", "message": "No URL provided"}), 400
-            
-            # Step 1: Jina Free
-            extracted_data = fetch_with_jina(url)
-            
-            if not extracted_data or not extracted_data.get("content"):
-                # Return 422 to signal the frontend to try the GAS/ScrapingAnt fallback
-                return jsonify({
-                    "status": "error", 
-                    "message": "Content is protected or blocked by security."
-                }), 422
-            
-            result_data = process_extracted_text(
-                extracted_data["content"], 
-                extracted_data.get("title") or url
-            )
-            return jsonify({"status": "success", "data": result_data})
-
-        # FILE EXTRACTION
         if 'file' not in request.files:
             return jsonify({"status": "error", "message": "No file part"}), 400
         
@@ -184,17 +108,17 @@ def extract():
         elif filename_lower.endswith(('.txt', '.md', '.csv')):
             full_text = file_bytes.decode('utf-8', errors='ignore')
         else:
-            return jsonify({"status": "error", "message": f"Format {filename_lower} is not supported yet."}), 400
+            return jsonify({"status": "error", "message": f"Format {filename_lower} not supported."}), 400
 
         if not full_text.strip():
-            return jsonify({"status": "error", "message": "The file seems to be empty or contains only images/scans."}), 422
+            return jsonify({"status": "error", "message": "Extracted text is empty."}), 422
 
         result_data = process_extracted_text(full_text, file.filename)
         return jsonify({"status": "success", "data": result_data})
         
     except Exception as e:
-        print(f"Main extraction error: {str(e)}")
-        return jsonify({"status": "error", "message": f"Extraction Server Error: {str(e)}"}), 500
+        print(f"Extraction error: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(port=5000)

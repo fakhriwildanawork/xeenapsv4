@@ -99,14 +99,14 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
             }));
           }
         } catch (err: any) {
-          // SPECIFIC MODAL FOR EXTRACTION FAILURE
+          // REQUESTED FINAL WARNING MODAL
           showXeenapsAlert({ 
             icon: 'warning', 
-            title: 'CONTENT PROTECTED', 
+            title: 'EXTRACTION FAILED', 
             text: 'This link can not be extracted, you can not use Insight Analyzer for this link and you are must be responsible for the content', 
             confirmButtonText: 'I UNDERSTAND' 
           });
-          // Ensure chunks are empty if extraction failed
+          // Clear chunks to prevent insight analyzer later
           setFormData(prev => ({ ...prev, chunks: [] }));
         } finally {
           setExtractionStage('IDLE');
