@@ -1,0 +1,6 @@
+
+flask
+pypdf
+python-pptx
+python-docx
+openpyxl

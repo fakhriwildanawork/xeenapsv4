@@ -1,0 +1,126 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Xeenaps - Personal Knowledge Management</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@sweetalert2/theme-minimal/minimal.css">
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #FFFFFF;
+      color: #004A74;
+      margin: 0;
+      padding: 0;
+      overflow-x: hidden;
+    }
+    .glass {
+      background: rgba(255, 255, 255, 0.7);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    
+    /* Global: Hide scrollbars but keep functionality */
+    * {
+      scrollbar-width: none; /* Firefox */
+      -ms-overflow-style: none; /* IE and Edge */
+    }
+    *::-webkit-scrollbar {
+      display: none; /* Chrome, Safari, Opera */
+    }
+
+    /* Skeleton Animation */
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg, #f0f0f0 25%, #f8f8f8 50%, #f0f0f0 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite linear;
+    }
+
+    /* Custom Bouncy Float Animation for Mobile Sidebar Toggle */
+    @keyframes xeenaps-bounce {
+      0%, 100% { transform: translateY(0) scale(1.1); }
+      50% { transform: translateY(-10px) scale(1.1); }
+    }
+    .animate-xeenaps-bounce {
+      animation: xeenaps-bounce 3s ease-in-out infinite;
+    }
+
+    /* Orientation Lock Screen Style */
+    #orientation-lock {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: #FFFFFF;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 2rem;
+    }
+
+    @keyframes phone-rotate {
+      0% { transform: rotate(0deg); }
+      50% { transform: rotate(-90deg); }
+      100% { transform: rotate(0deg); }
+    }
+    .rotate-icon {
+      animation: phone-rotate 2.5s ease-in-out infinite;
+    }
+
+    /* Overlay Blocking for Smartphones in Landscape (max-width: 767px) */
+    @media screen and (max-width: 767px) and (orientation: landscape) {
+      #orientation-lock {
+        display: flex;
+      }
+      #root {
+        display: none;
+      }
+    }
+  </style>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "@heroicons/react/": "https://esm.sh/@heroicons/react@^2.2.0/",
+    "react-router-dom": "https://esm.sh/react-router-dom@^7.12.0",
+    "vite": "https://esm.sh/vite@^7.3.1",
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
+    "sweetalert2": "https://esm.sh/sweetalert2@^11.26.17",
+    "@google/genai": "https://esm.sh/@google/genai@^1.37.0",
+    "lucide-react": "https://esm.sh/lucide-react@^0.475.0"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="orientation-lock">
+    <div class="glass p-10 rounded-[3rem] border-gray-100 flex flex-col items-center max-w-sm">
+      <img src="https://lh3.googleusercontent.com/d/1ZpVAXWGLDP2C42Fct0bisloaQLf2095_" class="w-16 h-16 mb-6 opacity-80" alt="Logo">
+      <div class="mb-8">
+        <svg class="w-16 h-16 text-[#004A74] rotate-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
+        </svg>
+      </div>
+      <h2 class="text-xl font-black text-[#004A74] mb-2">PORTRAIT ONLY</h2>
+      <p class="text-xs text-gray-500 font-medium uppercase tracking-widest leading-relaxed">
+        Please rotate your device back to portrait mode for the best Xeenaps experience.
+      </p>
+    </div>
+  </div>
+  <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
