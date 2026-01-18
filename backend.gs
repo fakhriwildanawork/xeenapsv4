@@ -1,7 +1,7 @@
 
 /**
- * XEENAPS PKM - SECURE BACKEND V23 (CONSOLIDATED EDITION)
- * 100% GAS Powered: Handles URLs (Jina/Ant) and Files (Ghost Extraction).
+ * XEENAPS PKM - SECURE BACKEND V24 (CONSOLIDATED & STABLE)
+ * Combines V16 File Stability with Advanced Web Extraction (Jina + ScrapingAnt).
  */
 
 const CONFIG = {
@@ -72,6 +72,7 @@ function doPost(e) {
     if (action === 'extractOnly') {
       let extractedText = "";
       let fileName = body.fileName || "Extracted Content";
+      
       try {
         if (body.url) {
           extractedText = handleUrlExtraction(body.url);
@@ -80,10 +81,15 @@ function doPost(e) {
           const blob = Utilities.newBlob(Utilities.base64Decode(body.fileData), mimeType, fileName);
           extractedText = extractTextContent(blob, mimeType);
         }
-        return createJsonResponse({ status: 'success', extractedText: extractedText, fileName: fileName });
       } catch (err) {
-        return createJsonResponse({ status: 'error', message: err.message });
+        extractedText = "Extraction failed: " + err.toString();
       }
+
+      return createJsonResponse({ 
+        status: 'success', 
+        extractedText: extractedText,
+        fileName: fileName
+      });
     }
     
     if (action === 'aiProxy') {
@@ -97,16 +103,104 @@ function doPost(e) {
   }
 }
 
+function getFileIdFromUrl(url) {
+  const match = url.match(/[-\w]{25,}/);
+  return match ? match[0] : null;
+}
+
 /**
- * CORE EXTRACTION: Ghost Method (Convert -> Read -> Delete)
+ * Enhanced URL Extraction (V16 Base + Jina + ScrapingAnt)
  */
-function extractTextContent(blob, mimeType) {
-  // 1. Basic Text Files
-  if (mimeType.includes('text/') || mimeType.includes('csv') || mimeType.includes('markdown')) {
-    return blob.getDataAsString();
+function handleUrlExtraction(url) {
+  const driveId = getFileIdFromUrl(url);
+  
+  // 1. Google Drive Handler (Stable V16 Logic)
+  if (driveId && url.includes('drive.google.com')) {
+    try {
+      const fileMeta = Drive.Files.get(driveId);
+      const mimeType = fileMeta.mimeType;
+      const isNative = mimeType.includes('google-apps');
+      
+      if (isNative) {
+        if (mimeType.includes('document')) return DocumentApp.openById(driveId).getBody().getText();
+        if (mimeType.includes('spreadsheet')) return SpreadsheetApp.openById(driveId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
+        if (mimeType.includes('presentation')) return SlidesApp.openById(driveId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
+      }
+
+      const blob = DriveApp.getFileById(driveId).getBlob();
+      return extractTextContent(blob, mimeType);
+    } catch (e) {
+      throw new Error("Drive access failed: " + e.message);
+    }
   }
 
-  // 2. Ghost Conversion (PDF, Word, Excel, PPT)
+  // 2. Web URL Handler - Stage 1: Jina Reader
+  const jinaContent = fetchWithJina(url);
+  if (jinaContent && jinaContent.length > 500) return jinaContent;
+
+  // 3. Web URL Handler - Stage 2: ScrapingAnt Bypass
+  const antKey = getScrapingAntKey();
+  if (antKey) {
+    try {
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${antKey}&browser=true&proxy_type=residential`;
+      const response = UrlFetchApp.fetch(antUrl, { muteHttpExceptions: true });
+      const html = response.getContentText();
+      if (response.getResponseCode() === 200 && !isBlocked(html)) {
+        return cleanHtml(html);
+      }
+    } catch (e) {}
+  }
+
+  // 4. Web URL Handler - Fallback: Simple Fetch (V16 Logic)
+  try {
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    return cleanHtml(response.getContentText());
+  } catch (e) {
+    throw new Error("Website fetch failed: " + e.message);
+  }
+}
+
+function fetchWithJina(url) {
+  try {
+    const response = UrlFetchApp.fetch("https://r.jina.ai/" + url, { muteHttpExceptions: true, headers: { "Accept": "application/json" } });
+    if (response.getResponseCode() === 200) {
+      const json = JSON.parse(response.getContentText());
+      const content = json.data?.content || "";
+      if (!isBlocked(content)) return content;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function isBlocked(text) {
+  if (!text || text.length < 350) return true;
+  const blockedKeywords = ["access denied", "cloudflare", "security check", "forbidden", "captcha", "bot detection"];
+  const textLower = text.toLowerCase();
+  return blockedKeywords.some(keyword => textLower.includes(keyword));
+}
+
+function cleanHtml(html) {
+  return html.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
+             .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
+             .replace(/<[^>]*>/g, " ")
+             .replace(/\s+/g, " ")
+             .trim();
+}
+
+function getScrapingAntKey() {
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEETS.KEYS);
+    const sheet = ss.getSheetByName("Scraping");
+    return sheet ? sheet.getRange("A1").getValue().toString().trim() : null;
+  } catch (e) { return null; }
+}
+
+/**
+ * Ghost Extraction logic (Stable V16)
+ */
+function extractTextContent(blob, mimeType) {
+  if (mimeType.includes('text/') || mimeType.includes('csv')) return blob.getDataAsString();
+
   let targetMimeType = 'application/vnd.google-apps.document';
   let appType = 'doc';
   
@@ -122,12 +216,10 @@ function extractTextContent(blob, mimeType) {
   let tempFileId = null;
   
   try {
-    // Stage 1: Convert to Google Workspace format
     const tempFile = Drive.Files.create(resource, blob);
     tempFileId = tempFile.id;
     let text = "";
 
-    // Stage 2: Read text based on app type
     if (appType === 'doc') {
       text = DocumentApp.openById(tempFileId).getBody().getText();
     } else if (appType === 'sheet') {
@@ -136,93 +228,12 @@ function extractTextContent(blob, mimeType) {
       text = SlidesApp.openById(tempFileId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
     }
     
+    Drive.Files.remove(tempFileId); 
     return text;
   } catch (e) {
+    if (tempFileId) { try { Drive.Files.remove(tempFileId); } catch(i) {} }
     throw new Error("Conversion failed: " + e.message);
-  } finally {
-    // Stage 3: Permanent Clean up
-    if (tempFileId) {
-      try { Drive.Files.remove(tempFileId); } catch(i) {}
-    }
   }
-}
-
-function handleUrlExtraction(url) {
-  // 0. Handle Google Drive
-  const driveId = getFileIdFromUrl(url);
-  if (driveId && url.includes('drive.google.com')) {
-    try {
-      const fileMeta = Drive.Files.get(driveId);
-      const mimeType = fileMeta.mimeType;
-      if (mimeType.includes('google-apps')) {
-        if (mimeType.includes('document')) return DocumentApp.openById(driveId).getBody().getText();
-        if (mimeType.includes('spreadsheet')) return SpreadsheetApp.openById(driveId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
-        if (mimeType.includes('presentation')) return SlidesApp.openById(driveId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
-      }
-      return extractTextContent(DriveApp.getFileById(driveId).getBlob(), mimeType);
-    } catch (e) { throw new Error("Drive access denied: " + e.message); }
-  }
-
-  // 1. Stage 1: Jina Reader
-  const jinaContent = fetchWithJina(url);
-  if (jinaContent && jinaContent.length > 500) return jinaContent;
-
-  // 2. Stage 2: ScrapingAnt Bypass
-  const antKey = getScrapingAntKey();
-  if (!antKey) throw new Error("Jina failed and ScrapingAnt Key is not configured.");
-  
-  try {
-    const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${antKey}&browser=true&proxy_type=residential`;
-    const response = UrlFetchApp.fetch(antUrl, { muteHttpExceptions: true });
-    if (response.getResponseCode() !== 200) throw new Error("Bypass Server Error (" + response.getResponseCode() + ")");
-
-    const html = response.getContentText();
-    if (isBlocked(html)) throw new Error("Target site blocked the bypass attempt.");
-
-    const cleaned = html.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
-                        .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
-                        .replace(/<[^>]*>/g, " ")
-                        .replace(/\s+/g, " ")
-                        .trim();
-
-    if (cleaned.length < 350) throw new Error("Insufficient content returned from bypass.");
-    return cleaned;
-  } catch (err) {
-    throw new Error(err.message || "All extraction methods failed.");
-  }
-}
-
-function fetchWithJina(url) {
-  try {
-    const jinaUrl = "https://r.jina.ai/" + url;
-    const response = UrlFetchApp.fetch(jinaUrl, { muteHttpExceptions: true, headers: { "Accept": "application/json" } });
-    if (response.getResponseCode() === 200) {
-      const json = JSON.parse(response.getContentText());
-      const content = json.data?.content || "";
-      if (!isBlocked(content)) return content;
-    }
-  } catch (e) {}
-  return null;
-}
-
-function isBlocked(text) {
-  if (!text || text.length < 350) return true;
-  const blockedKeywords = ["access denied", "cloudflare", "security check", "forbidden", "please enable cookies", "captcha", "bot detection"];
-  const textLower = text.toLowerCase();
-  return blockedKeywords.some(keyword => textLower.includes(keyword.toLowerCase()));
-}
-
-function getScrapingAntKey() {
-  try {
-    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEETS.KEYS);
-    const sheet = ss.getSheetByName("Scraping");
-    return sheet ? sheet.getRange("A1").getValue().toString().trim() : null;
-  } catch (e) { return null; }
-}
-
-function getFileIdFromUrl(url) {
-  const match = url.match(/[-\w]{25,}/);
-  return match ? match[0] : null;
 }
 
 function setupDatabase() {
@@ -234,7 +245,7 @@ function setupDatabase() {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#f3f3f3");
     sheet.setFrozenRows(1);
-    return { status: 'success', message: 'Database initialized successfully.' };
+    return { status: 'success', message: 'Database initialized.' };
   } catch (err) { return { status: 'error', message: err.toString() }; }
 }
 
@@ -259,7 +270,7 @@ function getDefaultModel(provider) {
 
 function handleAiRequest(provider, prompt, modelOverride) {
   const keys = (provider === 'groq') ? getKeysFromSheet('Groq', 2) : getKeysFromSheet('ApiKeys', 1);
-  if (!keys || keys.length === 0) return { status: 'error', message: 'No API keys.' };
+  if (!keys || keys.length === 0) return { status: 'error', message: 'No keys.' };
   const config = getProviderModel(provider);
   const model = modelOverride || config.model;
   for (let i = 0; i < keys.length; i++) {

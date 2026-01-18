@@ -78,7 +78,7 @@ export const extractFromUrl = async (url: string, onStageChange?: (stage: 'READI
     });
     
     const data = await res.json();
-    if (data.status === 'success' && data.extractedText) {
+    if (data.status === 'success' && data.extractedText && !data.extractedText.startsWith("Extraction failed")) {
       return processExtractedText(data.extractedText, data.fileName);
     }
     throw new Error(data.message || 'Extraction failed.');
@@ -90,7 +90,6 @@ export const extractFromUrl = async (url: string, onStageChange?: (stage: 'READI
 export const uploadAndStoreFile = async (file: File): Promise<ExtractionResult | null> => {
   if (!GAS_WEB_APP_URL) throw new Error('GAS_WEB_APP_URL missing.');
   
-  // Convert file to Base64 for GAS
   const reader = new FileReader();
   const base64Data = await new Promise<string>((resolve) => {
     reader.onload = () => resolve((reader.result as string).split(',')[1]);
@@ -108,7 +107,7 @@ export const uploadAndStoreFile = async (file: File): Promise<ExtractionResult |
   });
   
   const result = await response.json();
-  if (result.status === 'success' && result.extractedText) {
+  if (result.status === 'success' && result.extractedText && !result.extractedText.startsWith("Extraction failed")) {
     return processExtractedText(result.extractedText, file.name);
   }
   throw new Error(result.message || 'File processing failed.');
