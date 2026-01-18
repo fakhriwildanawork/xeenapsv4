@@ -4,3 +4,7 @@ pypdf
 python-pptx
 python-docx
 openpyxl
+requests
+readability-lxml
+beautifulsoup4
+lxml

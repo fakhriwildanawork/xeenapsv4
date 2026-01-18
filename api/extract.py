@@ -1,6 +1,9 @@
 
 import io
 import re
+import requests
+from readability import Document as ReadabilityDoc
+from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from pptx import Presentation
 from docx import Document
@@ -17,9 +20,9 @@ def clean_text(text):
     text = re.sub(r'([A-Z])\s(?=[a-z])', r'\1', text) 
     return " ".join(text.split())
 
-def extract_metadata_heuristics(full_text, filename):
+def extract_metadata_heuristics(full_text, filename_or_title):
     metadata = {
-        "title": filename.rsplit('.', 1)[0].replace("_", " "),
+        "title": filename_or_title.rsplit('.', 1)[0].replace("_", " ") if '.' in filename_or_title else filename_or_title,
         "authors": [],
         "year": "",
         "publisher": "",
@@ -34,7 +37,7 @@ def extract_metadata_heuristics(full_text, filename):
         metadata["year"] = year_match.group(0)
 
     # Heuristik Penerbit Sederhana
-    publishers = ["Elsevier", "Springer", "IEEE", "MDPI", "Nature", "Science", "Wiley", "Taylor & Francis", "ACM", "Frontiers", "Sage"]
+    publishers = ["Elsevier", "Springer", "IEEE", "MDPI", "Nature", "Science", "Wiley", "Taylor & Francis", "ACM", "Frontiers", "Sage", "Medium", "BBC", "CNN", "Wikipedia"]
     for pub in publishers:
         if pub.lower() in full_text[:10000].lower():
             metadata["publisher"] = pub
@@ -42,9 +45,68 @@ def extract_metadata_heuristics(full_text, filename):
 
     return metadata
 
+def process_extracted_text(full_text, title):
+    # 1. Batasi total teks (200.000 karakter)
+    limit_total = 200000
+    limited_text = full_text[:limit_total]
+
+    # 2. Heuristik metadata
+    metadata = extract_metadata_heuristics(limited_text, title)
+    
+    # 3. Snippet untuk AI (Groq/Gemini) - 7500 karakter
+    ai_snippet = limited_text[:7500]
+    
+    # 4. Split teks ke dalam 10 chunks (masing-masing 20.000 karakter)
+    chunk_size = 20000
+    chunks = [limited_text[i:i+chunk_size] for i in range(0, len(limited_text), chunk_size)][:10]
+
+    return {
+        **metadata,
+        "aiSnippet": ai_snippet,
+        "chunks": chunks
+    }
+
 @app.route('/api/extract', methods=['POST'])
 def extract():
     try:
+        # HANDLING URL EXTRACTION (JSON Payload)
+        if request.is_json:
+            data = request.get_json()
+            url = data.get('url')
+            if not url:
+                return jsonify({"status": "error", "message": "No URL provided"}), 400
+            
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+                }
+                response = requests.get(url, headers=headers, timeout=15)
+                response.raise_for_status()
+                
+                # Alur: Readability (Main Extraction)
+                doc = ReadabilityDoc(response.content)
+                summary_html = doc.summary()
+                title = doc.short_title()
+                
+                # Alur: BeautifulSoup (Paragraph Cleaning)
+                soup = BeautifulSoup(summary_html, 'lxml')
+                # Remove unwanted tags that might still be there
+                for s in soup(['script', 'style', 'nav', 'header', 'footer', 'aside']):
+                    s.decompose()
+                
+                full_text = soup.get_text(separator=' ')
+                full_text = clean_text(full_text)
+                
+                if not full_text.strip():
+                    return jsonify({"status": "error", "message": "Readability failed to find main content. Page might be protected or too complex."}), 422
+                
+                result_data = process_extracted_text(full_text, title)
+                return jsonify({"status": "success", "data": result_data})
+
+            except Exception as e:
+                return jsonify({"status": "error", "message": f"Web Extraction Error: {str(e)}"}), 500
+
+        # HANDLING FILE EXTRACTION (Multipart Form Data)
         if 'file' not in request.files:
             return jsonify({"status": "error", "message": "No file part"}), 400
         
@@ -54,99 +116,50 @@ def extract():
 
         filename_lower = file.filename.lower()
         
-        # Blokir file Audio dan Video secara eksplisit
         audio_video_ext = ('.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm')
         if filename_lower.endswith(audio_video_ext):
-            return jsonify({"status": "error", "message": "Audio and video files are not supported. Please upload a document."}), 400
+            return jsonify({"status": "error", "message": "Audio and video files are not supported."}), 400
 
-        # Handling file legacy (.doc, .xls, .ppt)
         legacy_ext = ('.doc', '.xls', '.ppt')
         if filename_lower.endswith(legacy_ext):
              return jsonify({
                 "status": "error", 
-                "message": f"Legacy format {filename_lower.split('.')[-1]} detected. Please save/convert as modern format (e.g. .docx, .xlsx, .pptx) before uploading."
+                "message": f"Legacy format detected. Please convert to modern format (.docx, .xlsx, .pptx)."
             }), 422
 
         file_bytes = file.read()
         f = io.BytesIO(file_bytes)
         full_text = ""
 
-        # Ekstraksi berdasarkan format file
         if filename_lower.endswith('.pdf'):
-            try:
-                reader = PdfReader(f)
-                for page in reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        full_text += page_text + "\n"
-            except Exception as e:
-                return jsonify({"status": "error", "message": f"PDF Extraction Error: {str(e)}"}), 422
-                
+            reader = PdfReader(f)
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text: full_text += page_text + "\n"
         elif filename_lower.endswith('.docx'):
-            try:
-                doc = Document(f)
-                full_text = "\n".join([para.text for para in doc.paragraphs])
-            except Exception as e:
-                return jsonify({"status": "error", "message": f"Word (.docx) Error: {str(e)}"}), 422
-
+            doc = Document(f)
+            full_text = "\n".join([para.text for para in doc.paragraphs])
         elif filename_lower.endswith('.pptx'):
-            try:
-                prs = Presentation(f)
-                for slide in prs.slides:
-                    # Ambil teks dari shape/box di slide
-                    for shape in slide.shapes:
-                        if hasattr(shape, "text") and shape.text:
-                            full_text += shape.text + "\n"
-                    # Ambil teks dari catatan pembicara (notes)
-                    if slide.has_notes_slide:
-                        notes_text = slide.notes_slide.notes_text_frame.text
-                        if notes_text:
-                            full_text += notes_text + "\n"
-            except Exception as e:
-                return jsonify({"status": "error", "message": f"PowerPoint (.pptx) Error: {str(e)}"}), 422
-
+            prs = Presentation(f)
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text: full_text += shape.text + "\n"
         elif filename_lower.endswith('.xlsx'):
-            try:
-                wb = openpyxl.load_workbook(f, data_only=True)
-                for sheet in wb.worksheets:
-                    for row in sheet.iter_rows(values_only=True):
-                        full_text += " ".join([str(cell) for cell in row if cell is not None]) + "\n"
-            except Exception as e:
-                return jsonify({"status": "error", "message": f"Excel (.xlsx) Error: {str(e)}"}), 422
-
+            wb = openpyxl.load_workbook(f, data_only=True)
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows(values_only=True):
+                    full_text += " ".join([str(cell) for cell in row if cell is not None]) + "\n"
         elif filename_lower.endswith(('.txt', '.md', '.csv')):
-            try:
-                full_text = file_bytes.decode('utf-8', errors='ignore')
-            except Exception as e:
-                return jsonify({"status": "error", "message": f"Text File Error: {str(e)}"}), 422
+            full_text = file_bytes.decode('utf-8', errors='ignore')
         else:
-            return jsonify({"status": "error", "message": "Unsupported file format. Please upload a common document format."}), 400
+            return jsonify({"status": "error", "message": "Unsupported file format."}), 400
 
         if not full_text.strip():
-            return jsonify({"status": "error", "message": "Document is empty or text could not be extracted."}), 422
+            return jsonify({"status": "error", "message": "Document is empty."}), 422
 
-        # 1. Batasi total teks (200.000 karakter)
-        limit_total = 200000
-        limited_text = full_text[:limit_total]
-
-        # 2. Heuristik metadata
-        metadata = extract_metadata_heuristics(limited_text, file.filename)
+        result_data = process_extracted_text(clean_text(full_text), file.filename)
+        return jsonify({"status": "success", "data": result_data})
         
-        # 3. Snippet untuk AI (Groq/Gemini) - 7500 karakter
-        ai_snippet = limited_text[:7500]
-        
-        # 4. Split teks ke dalam 10 chunks (masing-masing 20.000 karakter)
-        chunk_size = 20000
-        chunks = [limited_text[i:i+chunk_size] for i in range(0, len(limited_text), chunk_size)][:10]
-
-        return jsonify({
-            "status": "success",
-            "data": {
-                **metadata,
-                "aiSnippet": ai_snippet,
-                "chunks": chunks
-            }
-        })
     except Exception as e:
         return jsonify({"status": "error", "message": f"Internal Server Error: {str(e)}"}), 500
 

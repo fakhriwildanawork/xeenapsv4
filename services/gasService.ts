@@ -125,28 +125,52 @@ const processExtractedText = (extractedText: string, defaultTitle: string = ""):
 
 /**
  * EKSTRAKSI DARI URL (Google Drive atau Website)
+ * Hybrid Logic: Drive links use GAS, Web links use Vercel Python.
  */
 export const extractFromUrl = async (url: string): Promise<ExtractionResult | null> => {
   try {
-    if (!GAS_WEB_APP_URL) throw new Error('VITE_GAS_URL is missing.');
+    const isDriveUrl = url.includes('drive.google.com');
 
-    const gasResponse = await fetch(GAS_WEB_APP_URL, {
-      method: 'POST',
-      body: JSON.stringify({ 
-        action: 'extractOnly', 
-        url
-      }),
-    });
+    if (isDriveUrl) {
+      // DRIVE LINK -> GAS (For internal authorization)
+      if (!GAS_WEB_APP_URL) throw new Error('VITE_GAS_URL is missing.');
 
-    if (!gasResponse.ok) {
-      const errText = await gasResponse.text();
-      throw new Error(`Extraction Failed: ${errText}`);
+      const gasResponse = await fetch(GAS_WEB_APP_URL, {
+        method: 'POST',
+        body: JSON.stringify({ 
+          action: 'extractOnly', 
+          url
+        }),
+      });
+
+      if (!gasResponse.ok) {
+        const errText = await gasResponse.text();
+        throw new Error(`Extraction Failed: ${errText}`);
+      }
+      
+      const gasResult = await gasResponse.json();
+      if (gasResult.status !== 'success') throw new Error(gasResult.message || 'Link processing failed.');
+
+      return processExtractedText(gasResult.extractedText || "", gasResult.fileName || "");
+    } else {
+      // REGULAR WEB LINK -> Vercel Python (Superior Extraction via Readability + BS4)
+      const response = await fetch('/api/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Web Extraction Failed: ${errText}`);
+      }
+
+      const result = await response.json();
+      if (result.status === 'success') {
+        return result.data as ExtractionResult;
+      }
+      throw new Error(result.message || 'Link processing failed.');
     }
-    
-    const gasResult = await gasResponse.json();
-    if (gasResult.status !== 'success') throw new Error(gasResult.message || 'Link processing failed.');
-
-    return processExtractedText(gasResult.extractedText || "", gasResult.fileName || "");
 
   } catch (error: any) {
     console.error('Link Extraction Error:', error);
@@ -155,41 +179,28 @@ export const extractFromUrl = async (url: string): Promise<ExtractionResult | nu
 };
 
 /**
- * MENGIRIM FILE UNTUK EKSTRAKSI SAJA.
+ * MENGIRIM FILE UNTUK EKSTRAKSI SAJA (Vercel Python API).
  */
 export const uploadAndStoreFile = async (file: File): Promise<ExtractionResult | null> => {
   try {
-    if (!GAS_WEB_APP_URL) throw new Error('VITE_GAS_URL is missing.');
+    const formData = new FormData();
+    formData.append('file', file);
 
-    const reader = new FileReader();
-    const base64Promise = new Promise<string>((resolve) => {
-      reader.onload = () => {
-        const result = reader.result as string;
-        resolve(result.split(',')[1]);
-      };
-      reader.readAsDataURL(file);
-    });
-    const fileData = await base64Promise;
-
-    const gasResponse = await fetch(GAS_WEB_APP_URL, {
+    const response = await fetch('/api/extract', {
       method: 'POST',
-      body: JSON.stringify({ 
-        action: 'extractOnly', 
-        fileData, 
-        fileName: file.name,
-        mimeType: file.type || 'application/octet-stream'
-      }),
+      body: formData,
     });
 
-    if (!gasResponse.ok) {
-      const errText = await gasResponse.text();
+    if (!response.ok) {
+      const errText = await response.text();
       throw new Error(`Extraction Failed: ${errText}`);
     }
     
-    const gasResult = await gasResponse.json();
-    if (gasResult.status !== 'success') throw new Error(gasResult.message || 'File processing failed.');
-
-    return processExtractedText(gasResult.extractedText || "", file.name.split('.')[0].replace(/_/g, ' '));
+    const result = await response.json();
+    if (result.status === 'success') {
+      return result.data as ExtractionResult;
+    }
+    throw new Error(result.message || 'File processing failed.');
 
   } catch (error: any) {
     console.error('Extraction Error:', error);
@@ -198,7 +209,7 @@ export const uploadAndStoreFile = async (file: File): Promise<ExtractionResult |
 };
 
 /**
- * MENYIMPAN ITEM KE SPREADSHEET.
+ * MENYIMPAN ITEM KE SPREADSHEET (GAS).
  */
 export const saveLibraryItem = async (
   item: LibraryItem, 
