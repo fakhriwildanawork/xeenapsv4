@@ -124,56 +124,72 @@ const processExtractedText = (extractedText: string, defaultTitle: string = ""):
 };
 
 /**
- * EKSTRAKSI DARI URL (Google Drive atau Website)
- * Hybrid Logic: Drive links use GAS, Web links use Vercel Python.
+ * EKSTRAKSI DARI URL (Triple Threat Logic)
+ * 1. Jina Reader (Vercel Python)
+ * 2. GAS Native Fetch
+ * 3. ScrapingAnt (via GAS)
  */
 export const extractFromUrl = async (url: string): Promise<ExtractionResult | null> => {
   try {
     const isDriveUrl = url.includes('drive.google.com');
 
+    // DRIVE LINK -> Direct GAS (Special logic for Auth/Conversion)
     if (isDriveUrl) {
-      // DRIVE LINK -> GAS (For internal authorization)
       if (!GAS_WEB_APP_URL) throw new Error('VITE_GAS_URL is missing.');
 
       const gasResponse = await fetch(GAS_WEB_APP_URL, {
         method: 'POST',
-        body: JSON.stringify({ 
-          action: 'extractOnly', 
-          url
-        }),
+        body: JSON.stringify({ action: 'extractOnly', url }),
       });
 
-      if (!gasResponse.ok) {
-        const errText = await gasResponse.text();
-        throw new Error(`Extraction Failed: ${errText}`);
-      }
+      if (!gasResponse.ok) throw new Error(`GAS Drive Extraction Failed`);
       
       const gasResult = await gasResponse.json();
-      if (gasResult.status !== 'success') throw new Error(gasResult.message || 'Link processing failed.');
+      if (gasResult.status !== 'success') throw new Error(gasResult.message || 'Drive processing failed.');
 
       return processExtractedText(gasResult.extractedText || "", gasResult.fileName || "");
-    } else {
-      // REGULAR WEB LINK -> Vercel Python (Superior Extraction via Readability + BS4)
-      const response = await fetch('/api/extract', {
+    } 
+
+    // REGULAR WEB LINK -> TRIPLE THREAT SEQUENCE
+    
+    // METHOD 1: JINA (Python API)
+    try {
+      const jinaResponse = await fetch('/api/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url })
       });
 
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`Web Extraction Failed: ${errText}`);
+      if (jinaResponse.ok) {
+        const result = await jinaResponse.json();
+        if (result.status === 'success') return result.data as ExtractionResult;
       }
-
-      const result = await response.json();
-      if (result.status === 'success') {
-        return result.data as ExtractionResult;
-      }
-      throw new Error(result.message || 'Link processing failed.');
+      console.warn("Method 1 (Jina) failed or blocked. Proceeding to Method 2 (GAS Native)...");
+    } catch (jinaErr) {
+      console.warn("Jina fetch error:", jinaErr);
     }
 
+    // METHOD 2 & 3: GAS NATIVE & SCRAPINGANT (Handled inside GAS extractOnly)
+    if (!GAS_WEB_APP_URL) throw new Error('GAS Backend URL not configured for fallback.');
+
+    const fallbackResponse = await fetch(GAS_WEB_APP_URL, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'extractOnly', url }),
+    });
+
+    if (!fallbackResponse.ok) {
+      throw new Error(`Fallback Extraction Failed with status ${fallbackResponse.status}`);
+    }
+
+    const fallbackResult = await fallbackResponse.json();
+    if (fallbackResult.status === 'success' && fallbackResult.extractedText) {
+      return processExtractedText(fallbackResult.extractedText, fallbackResult.fileName || "");
+    }
+
+    throw new Error(fallbackResult.message || 'All extraction methods failed.');
+
   } catch (error: any) {
-    console.error('Link Extraction Error:', error);
+    console.error('Final Extraction Error:', error);
     throw error;
   }
 };

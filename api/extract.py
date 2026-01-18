@@ -1,3 +1,4 @@
+
 import io
 import re
 import requests
@@ -12,12 +13,6 @@ app = Flask(__name__)
 # Set max content length to 25MB
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-]
-
 def clean_text(text):
     if not text:
         return ""
@@ -26,9 +21,10 @@ def clean_text(text):
     if not isinstance(text, str):
         text = str(text)
     
-    # Remove HTML tags if any (basic fallback)
+    # Remove script and style tags
     text = re.sub(r'<script\b[^>]*>([\s\S]*?)</script>', '', text, flags=re.I)
     text = re.sub(r'<style\b[^>]*>([\s\S]*?)</style>', '', text, flags=re.I)
+    # Remove HTML tags
     text = re.sub(r'<[^>]*>', ' ', text)
     
     # Clean weird spacing and extra newlines
@@ -36,12 +32,11 @@ def clean_text(text):
     return text.strip()
 
 def fetch_with_jina(url):
-    """Primary method: Jina Reader for clean Markdown."""
+    """Method 1: Jina Reader for clean Markdown (No API Key)."""
     jina_url = f"https://r.jina.ai/{url}"
     try:
         headers = {
-            "Accept": "application/json",
-            "X-With-Generated-Alt": "true"
+            "Accept": "application/json"
         }
         response = requests.get(jina_url, headers=headers, timeout=15)
         if response.status_code == 200:
@@ -55,25 +50,6 @@ def fetch_with_jina(url):
                 }
     except Exception as e:
         print(f"Jina error for {url}: {str(e)}")
-    return None
-
-def fetch_direct_fallback(url):
-    """Fallback method: Direct fetch with browser headers."""
-    try:
-        headers = {
-            "User-Agent": USER_AGENTS[0],
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-        }
-        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
-        if response.status_code == 200:
-            return {
-                "content": response.text,
-                "title": url,
-                "description": ""
-            }
-    except Exception as e:
-        print(f"Direct fallback error for {url}: {str(e)}")
     return None
 
 def extract_metadata_heuristics(full_text, filename_or_title):
@@ -132,24 +108,19 @@ def extract():
             if not url:
                 return jsonify({"status": "error", "message": "No URL provided"}), 400
             
-            # 1. Try Jina
+            # Step 1: Jina Free
             extracted_data = fetch_with_jina(url)
             
-            # 2. If Jina fails, try Direct Fetch
-            if not extracted_data:
-                print(f"Jina failed for {url}, trying direct fallback...")
-                extracted_data = fetch_direct_fallback(url)
-            
             if not extracted_data or not extracted_data.get("content"):
+                # Return 422 to signal the frontend to try the GAS/ScrapingAnt fallback
                 return jsonify({
                     "status": "error", 
-                    "message": "Access Denied: This website is heavily protected or blocking our scrapers. Try downloading the page as PDF and upload it instead."
+                    "message": "Jina extraction failed or blocked."
                 }), 422
             
             result_data = process_extracted_text(
                 extracted_data["content"], 
-                extracted_data.get("title") or url,
-                {"publisher": ""}
+                extracted_data.get("title") or url
             )
             return jsonify({"status": "success", "data": result_data})
 
