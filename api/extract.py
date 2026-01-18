@@ -16,11 +16,21 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
 
 def clean_text(text):
+    # Pastikan input adalah string untuk menghindari error "bytes-like object"
+    if isinstance(text, bytes):
+        text = text.decode('utf-8', errors='ignore')
+    if not isinstance(text, str):
+        text = str(text)
+        
     # Membersihkan karakter aneh dan spasi berlebih
     text = re.sub(r'([A-Z])\s(?=[a-z])', r'\1', text) 
     return " ".join(text.split())
 
 def extract_metadata_heuristics(full_text, filename_or_title):
+    # Pastikan input adalah string
+    if not isinstance(full_text, str):
+        full_text = str(full_text)
+        
     metadata = {
         "title": filename_or_title.rsplit('.', 1)[0].replace("_", " ") if '.' in filename_or_title else filename_or_title,
         "authors": [],
@@ -46,6 +56,10 @@ def extract_metadata_heuristics(full_text, filename_or_title):
     return metadata
 
 def process_extracted_text(full_text, title):
+    # Pastikan input adalah string
+    if not isinstance(full_text, str):
+        full_text = str(full_text)
+        
     # 1. Batasi total teks (200.000 karakter)
     limit_total = 200000
     limited_text = full_text[:limit_total]
@@ -77,32 +91,54 @@ def extract():
                 return jsonify({"status": "error", "message": "No URL provided"}), 400
             
             try:
+                # Headers yang lebih lengkap untuk menghindari 403 Forbidden
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Cache-Control': 'max-age=0'
                 }
-                response = requests.get(url, headers=headers, timeout=15)
+                
+                response = requests.get(url, headers=headers, timeout=20)
                 response.raise_for_status()
                 
+                # Gunakan response.text (string) bukan response.content (bytes) 
+                # untuk menghindari error regex "bytes-like object" di dalam library
+                html_str = response.text
+                
                 # Alur: Readability (Main Extraction)
-                doc = ReadabilityDoc(response.content)
+                doc = ReadabilityDoc(html_str)
                 summary_html = doc.summary()
                 title = doc.short_title()
                 
                 # Alur: BeautifulSoup (Paragraph Cleaning)
                 soup = BeautifulSoup(summary_html, 'lxml')
-                # Remove unwanted tags that might still be there
-                for s in soup(['script', 'style', 'nav', 'header', 'footer', 'aside']):
+                
+                # Hapus elemen sampah yang mungkin tersisa
+                for s in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe', 'button', 'input']):
                     s.decompose()
                 
+                # Ambil teks bersih
                 full_text = soup.get_text(separator=' ')
                 full_text = clean_text(full_text)
                 
                 if not full_text.strip():
-                    return jsonify({"status": "error", "message": "Readability failed to find main content. Page might be protected or too complex."}), 422
+                    return jsonify({"status": "error", "message": "Content extraction returned empty text. The page might be protected or dynamic."}), 422
                 
                 result_data = process_extracted_text(full_text, title)
                 return jsonify({"status": "success", "data": result_data})
 
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if e.response else 500
+                return jsonify({"status": "error", "message": f"Website blocked access (Error {status_code}). Some academic sites require VPN or institutional login."}), status_code
             except Exception as e:
                 return jsonify({"status": "error", "message": f"Web Extraction Error: {str(e)}"}), 500
 
@@ -116,15 +152,17 @@ def extract():
 
         filename_lower = file.filename.lower()
         
+        # Audio/Video rejection
         audio_video_ext = ('.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm')
         if filename_lower.endswith(audio_video_ext):
             return jsonify({"status": "error", "message": "Audio and video files are not supported."}), 400
 
+        # Legacy conversion rejection
         legacy_ext = ('.doc', '.xls', '.ppt')
         if filename_lower.endswith(legacy_ext):
              return jsonify({
                 "status": "error", 
-                "message": f"Legacy format detected. Please convert to modern format (.docx, .xlsx, .pptx)."
+                "message": "Legacy format detected. Please convert to modern format (.docx, .xlsx, .pptx)."
             }), 422
 
         file_bytes = file.read()
@@ -161,7 +199,7 @@ def extract():
         return jsonify({"status": "success", "data": result_data})
         
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Internal Server Error: {str(e)}"}), 500
+        return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(port=5000)
