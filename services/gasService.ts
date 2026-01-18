@@ -52,6 +52,9 @@ export const callAiProxy = async (provider: 'groq' | 'gemini', prompt: string, m
 };
 
 const processExtractedText = (extractedText: string, defaultTitle: string = ""): ExtractionResult => {
+  if (!extractedText || extractedText.length < 300) {
+    throw new Error("Insufficient content extracted.");
+  }
   const limitTotal = 200000;
   const limitedText = extractedText.substring(0, limitTotal);
   const aiSnippet = limitedText.substring(0, 7500);
@@ -64,11 +67,12 @@ const processExtractedText = (extractedText: string, defaultTitle: string = ""):
   return { title: defaultTitle, fullText: limitedText, aiSnippet, chunks } as ExtractionResult;
 };
 
-export const extractFromUrl = async (url: string): Promise<ExtractionResult | null> => {
+export const extractFromUrl = async (url: string, onStageChange?: (stage: 'READING' | 'BYPASS' | 'AI_ANALYSIS') => void): Promise<ExtractionResult | null> => {
   console.info(`[Xeenaps] Starting extraction for: ${url}`);
   try {
     if (url.includes('drive.google.com')) {
       console.info(`[Xeenaps] Detected Google Drive link. Calling GAS...`);
+      onStageChange?.('READING');
       const res = await fetch(GAS_WEB_APP_URL, {
         method: 'POST',
         body: JSON.stringify({ action: 'extractOnly', url }),
@@ -80,26 +84,29 @@ export const extractFromUrl = async (url: string): Promise<ExtractionResult | nu
 
     // 1. Jina Stage
     console.info(`[Xeenaps] Method 1: Jina Reader Stage...`);
+    onStageChange?.('READING');
     try {
       const jinaRes = await fetch('/api/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url })
       });
-      if (jinaRes.ok) {
+      
+      if (jinaRes.status === 200) {
         const result = await jinaRes.json();
-        if (result.status === 'success') {
+        if (result.status === 'success' && result.data?.fullText?.length >= 300) {
           console.info(`[Xeenaps] Method 1 Succeeded.`);
           return result.data as ExtractionResult;
         }
       }
-      console.warn(`[Xeenaps] Method 1 failed with status ${jinaRes.status}. Falling back to GAS...`);
+      console.warn(`[Xeenaps] Method 1 failed validation. Falling back...`);
     } catch (e) {
-      console.warn(`[Xeenaps] Method 1 exception. Falling back to GAS...`);
+      console.warn(`[Xeenaps] Method 1 exception.`);
     }
 
-    // 2. GAS Stage (Native + ScrapingAnt)
-    console.info(`[Xeenaps] Method 2: GAS Bypass Stage...`);
+    // 2. GAS Stage (Native + ScrapingAnt Bypass)
+    console.info(`[Xeenaps] Method 2/3: GAS Bypass Stage...`);
+    onStageChange?.('BYPASS');
     if (!GAS_WEB_APP_URL) throw new Error('GAS URL missing.');
     const gasRes = await fetch(GAS_WEB_APP_URL, {
       method: 'POST',
@@ -112,7 +119,7 @@ export const extractFromUrl = async (url: string): Promise<ExtractionResult | nu
       return processExtractedText(gasData.extractedText, gasData.fileName);
     }
 
-    throw new Error(gasData.message || 'All extraction methods failed.');
+    throw new Error(gasData.message || 'All extraction methods failed to return content.');
   } catch (error: any) {
     console.error('[Xeenaps] Final Extraction Error:', error.message);
     throw error;

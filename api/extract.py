@@ -13,6 +13,25 @@ app = Flask(__name__)
 # Set max content length to 25MB
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
 
+def is_blocked_content(text):
+    """Detects if the extracted text is actually an 'Access Denied' or protection page."""
+    if not text or len(text) < 300: # Usually error pages are short
+        return True
+    
+    blocked_keywords = [
+        "access denied", "cloudflare", "security check", "forbidden", 
+        "please enable cookies", "checking your browser", "robot",
+        "captcha", "403 forbidden", "403 error", "bot detection",
+        "not authorized", "limit reached", "Taylor & Francis Online: Access Denied",
+        "verify you are a human", "wait a moment", "standard terms and conditions"
+    ]
+    
+    text_lower = text.lower()
+    for keyword in blocked_keywords:
+        if keyword.lower() in text_lower:
+            return True
+    return False
+
 def clean_text(text):
     if not text:
         return ""
@@ -42,9 +61,16 @@ def fetch_with_jina(url):
         if response.status_code == 200:
             json_data = response.json()
             data = json_data.get("data", {})
-            if data and data.get("content"):
+            content = data.get("content", "")
+            
+            # CRITICAL: Verify if content is actually blocked
+            if is_blocked_content(content):
+                print(f"Jina returned blocked content for {url}")
+                return None
+
+            if content:
                 return {
-                    "content": data.get("content", ""),
+                    "content": content,
                     "title": data.get("title", ""),
                     "description": data.get("description", "")
                 }
@@ -115,7 +141,7 @@ def extract():
                 # Return 422 to signal the frontend to try the GAS/ScrapingAnt fallback
                 return jsonify({
                     "status": "error", 
-                    "message": "Jina extraction failed or blocked."
+                    "message": "Content is protected or blocked by security."
                 }), 422
             
             result_data = process_extracted_text(

@@ -73,7 +73,7 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
         lastExtractedUrl.current = url;
         setExtractionStage('READING');
         try {
-          const result = await extractFromUrl(url);
+          const result = await extractFromUrl(url, (stage) => setExtractionStage(stage));
           if (result) {
             setExtractionStage('AI_ANALYSIS');
             const aiMeta = await extractMetadataWithAI(result.aiSnippet || result.fullText || "");
@@ -99,7 +99,15 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
             }));
           }
         } catch (err: any) {
-          showXeenapsAlert({ icon: 'warning', title: 'Extraction Warning', text: err.message || 'Auto-metadata failed.', confirmButtonText: 'OK' });
+          // SPECIFIC MODAL FOR EXTRACTION FAILURE
+          showXeenapsAlert({ 
+            icon: 'warning', 
+            title: 'CONTENT PROTECTED', 
+            text: 'This link can not be extracted, you can not use Insight Analyzer for this link and you are must be responsible for the content', 
+            confirmButtonText: 'I UNDERSTAND' 
+          });
+          // Ensure chunks are empty if extraction failed
+          setFormData(prev => ({ ...prev, chunks: [] }));
         } finally {
           setExtractionStage('IDLE');
         }

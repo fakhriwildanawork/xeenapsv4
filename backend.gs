@@ -1,7 +1,7 @@
 
 /**
- * XEENAPS PKM - SECURE BACKEND V18
- * Improved Triple Threat Extraction: Native GAS -> ScrapingAnt Fallback with detection.
+ * XEENAPS PKM - SECURE BACKEND V20
+ * Strict Cascading Extraction: Native GAS -> ScrapingAnt.
  */
 
 const CONFIG = {
@@ -49,9 +49,7 @@ function doPost(e) {
   const action = body.action;
   
   try {
-    if (action === 'setupDatabase') {
-      return createJsonResponse(setupDatabase());
-    }
+    if (action === 'setupDatabase') return createJsonResponse(setupDatabase());
     
     if (action === 'saveItem') {
       const item = body.item;
@@ -74,7 +72,6 @@ function doPost(e) {
     if (action === 'extractOnly') {
       let extractedText = "";
       let fileName = body.fileName || "Extracted Content";
-      
       try {
         if (body.url) {
           extractedText = handleUrlExtraction(body.url);
@@ -83,15 +80,10 @@ function doPost(e) {
           const blob = Utilities.newBlob(Utilities.base64Decode(body.fileData), mimeType, fileName);
           extractedText = extractTextContent(blob, mimeType);
         }
+        return createJsonResponse({ status: 'success', extractedText: extractedText, fileName: fileName });
       } catch (err) {
-        return createJsonResponse({ status: 'error', message: err.toString() });
+        return createJsonResponse({ status: 'error', message: err.message });
       }
-
-      return createJsonResponse({ 
-        status: 'success', 
-        extractedText: extractedText,
-        fileName: fileName
-      });
     }
     
     if (action === 'aiProxy') {
@@ -105,94 +97,102 @@ function doPost(e) {
   }
 }
 
-function getScrapingAntKey() {
-  try {
-    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEETS.KEYS);
-    const sheet = ss.getSheetByName("Scraping");
-    if (!sheet) return null;
-    return sheet.getRange("A1").getValue().toString().trim();
-  } catch (e) {
-    console.error("Failed to fetch ScrapingAnt Key:", e);
-    return null;
-  }
-}
-
-function getFileIdFromUrl(url) {
-  const match = url.match(/[-\w]{25,}/);
-  return match ? match[0] : null;
+function isBlocked(text) {
+  if (!text || text.length < 350) return true; // Stricter length check
+  const blockedKeywords = [
+    "access denied", "cloudflare", "security check", "forbidden", 
+    "please enable cookies", "checking your browser", "robot",
+    "captcha", "403 forbidden", "403 error", "bot detection",
+    "not authorized", "limit reached", "Taylor & Francis Online: Access Denied",
+    "standard terms and conditions", "wait a moment", "verify you are a human",
+    "one more step", "browser security"
+  ];
+  const textLower = text.toLowerCase();
+  return blockedKeywords.some(keyword => textLower.includes(keyword.toLowerCase()));
 }
 
 function handleUrlExtraction(url) {
   const driveId = getFileIdFromUrl(url);
-  
   if (driveId && url.includes('drive.google.com')) {
     try {
       const fileMeta = Drive.Files.get(driveId);
       const mimeType = fileMeta.mimeType;
-      const isNative = mimeType.includes('google-apps');
-      if (isNative) {
+      if (mimeType.includes('google-apps')) {
         if (mimeType.includes('document')) return DocumentApp.openById(driveId).getBody().getText();
         if (mimeType.includes('spreadsheet')) return SpreadsheetApp.openById(driveId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
       }
-      const blob = DriveApp.getFileById(driveId).getBlob();
-      return extractTextContent(blob, mimeType);
-    } catch (e) {
-      throw new Error("Drive access denied: " + e.message);
-    }
+      return extractTextContent(DriveApp.getFileById(driveId).getBlob(), mimeType);
+    } catch (e) { throw new Error("Drive access denied: " + e.message); }
   }
 
   let webText = "";
   let needsScrapingAnt = false;
 
-  // 1. TRY NATIVE GAS FETCH
+  // 1. NATIVE GAS FETCH
   try {
     const response = UrlFetchApp.fetch(url, { 
       muteHttpExceptions: true,
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" }
+      headers: { 
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/"
+      }
     });
     
     const code = response.getResponseCode();
     const content = response.getContentText();
     
-    // Check if response is blocked
-    if (code === 403 || code === 401 || content.includes('Cloudflare') || content.includes('Access Denied') || content.length < 500) {
+    if (code !== 200 || isBlocked(content)) {
       needsScrapingAnt = true;
     } else {
-      webText = content.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
-                       .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
-                       .replace(/<[^>]*>/g, " ")
-                       .replace(/\s+/g, " ")
-                       .trim();
+      webText = cleanHtml(content);
+      if (webText.length < 300) needsScrapingAnt = true; // Fallback if cleaned text is too short
     }
-  } catch (e) {
-    needsScrapingAnt = true;
-  }
+  } catch (e) { needsScrapingAnt = true; }
 
   // 2. SCRAPINGANT FALLBACK
   if (needsScrapingAnt) {
     const antKey = getScrapingAntKey();
-    if (!antKey) throw new Error("This site is protected and ScrapingAnt key is missing in your sheet.");
+    if (!antKey) throw new Error("PROTECTED: ScrapingAnt key missing.");
     
     try {
-      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${antKey}&browser=true`;
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${antKey}&browser=true&proxy_type=residential`;
       const antResponse = UrlFetchApp.fetch(antUrl, { muteHttpExceptions: true });
       if (antResponse.getResponseCode() === 200) {
         const antHtml = antResponse.getContentText();
-        webText = antHtml.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
-                         .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
-                         .replace(/<[^>]*>/g, " ")
-                         .replace(/\s+/g, " ")
-                         .trim();
+        if (isBlocked(antHtml)) throw new Error("BYPASS_FAILED: Content still blocked after proxy.");
+        webText = cleanHtml(antHtml);
+        if (webText.length < 300) throw new Error("BYPASS_FAILED: Extracted text insufficient.");
       } else {
-        throw new Error("ScrapingAnt also failed: " + antResponse.getContentText().substring(0, 100));
+        throw new Error("BYPASS_FAILED: HTTP " + antResponse.getResponseCode());
       }
-    } catch (antErr) {
-      throw new Error("Bypass failed: " + antErr.toString());
+    } catch (antErr) { 
+      throw new Error(antErr.message || "Final bypass method failed.");
     }
   }
 
-  if (webText.length > 10) return webText;
-  throw new Error("Could not extract any content from this URL.");
+  return webText;
+}
+
+function cleanHtml(html) {
+  return html.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
+             .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
+             .replace(/<[^>]*>/g, " ")
+             .replace(/\s+/g, " ")
+             .trim();
+}
+
+function getScrapingAntKey() {
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEETS.KEYS);
+    const sheet = ss.getSheetByName("Scraping");
+    return sheet ? sheet.getRange("A1").getValue().toString().trim() : null;
+  } catch (e) { return null; }
+}
+
+function getFileIdFromUrl(url) {
+  const match = url.match(/[-\w]{25,}/);
+  return match ? match[0] : null;
 }
 
 function extractTextContent(blob, mimeType) {
@@ -221,9 +221,7 @@ function setupDatabase() {
     sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#f3f3f3");
     sheet.setFrozenRows(1);
     return { status: 'success', message: 'Database initialized successfully.' };
-  } catch (err) {
-    return { status: 'error', message: err.toString() };
-  }
+  } catch (err) { return { status: 'error', message: err.toString() }; }
 }
 
 function getProviderModel(providerName) {
@@ -262,12 +260,7 @@ function handleAiRequest(provider, prompt, modelOverride) {
 
 function callGroqApi(apiKey, model, prompt) {
   const url = "https://api.groq.com/openai/v1/chat/completions";
-  const payload = {
-    model: model,
-    messages: [{ role: "system", content: "Academic librarian. RAW JSON ONLY." }, { role: "user", content: prompt }],
-    temperature: 0.1,
-    response_format: { type: "json_object" }
-  };
+  const payload = { model: model, messages: [{ role: "system", content: "Academic librarian. RAW JSON ONLY." }, { role: "user", content: prompt }], temperature: 0.1, response_format: { type: "json_object" } };
   const res = UrlFetchApp.fetch(url, { method: "post", contentType: "application/json", headers: { "Authorization": "Bearer " + apiKey }, payload: JSON.stringify(payload), muteHttpExceptions: true });
   const json = JSON.parse(res.getContentText());
   if (json.error) throw new Error(json.error.message);
