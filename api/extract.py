@@ -26,10 +26,45 @@ def clean_text(text):
     text = re.sub(r'([A-Z])\s(?=[a-z])', r'\1', text) 
     return " ".join(text.split())
 
+def extract_doi(url):
+    """Mendeteksi DOI dari URL menggunakan Regex."""
+    doi_pattern = r'(10\.\d{4,9}/[-._;()/:A-Z0-9]+)'
+    match = re.search(doi_pattern, url, re.IGNORECASE)
+    return match.group(1) if match else None
+
+def fetch_from_crossref(doi):
+    """Mengambil metadata dari Crossref API (Bebas blokir untuk jurnal)."""
+    try:
+        api_url = f"https://api.crossref.org/works/{doi}"
+        headers = {'User-Agent': 'XeenapsPKM/1.0 (mailto:admin@xeenaps.com)'}
+        response = requests.get(api_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json().get('message', {})
+            
+            # Format Authors
+            authors = [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in data.get('author', [])]
+            
+            # Extract Year
+            year = ""
+            pub_date = data.get('published-print') or data.get('published-online') or data.get('issued')
+            if pub_date and pub_date.get('date-parts'):
+                year = str(pub_date['date-parts'][0][0])
+
+            return {
+                "title": data.get('title', [""])[0],
+                "authors": authors,
+                "year": year,
+                "publisher": data.get('container-title', [""])[0] or data.get('publisher', ""),
+                "category": "Original Research",
+                "type": "Literature"
+            }
+    except Exception as e:
+        print(f"Crossref Error: {e}")
+    return None
+
 def extract_metadata_heuristics(full_text, filename_or_title):
     # Pastikan input adalah string
-    if not isinstance(full_text, str):
-        full_text = str(full_text)
+    text_str = str(full_text)
         
     metadata = {
         "title": filename_or_title.rsplit('.', 1)[0].replace("_", " ") if '.' in filename_or_title else filename_or_title,
@@ -42,30 +77,32 @@ def extract_metadata_heuristics(full_text, filename_or_title):
     }
 
     # Ekstraksi Tahun
-    year_match = re.search(r'\b(19|20)\d{2}\b', full_text[:5000])
+    year_match = re.search(r'\b(19|20)\d{2}\b', text_str[:5000])
     if year_match:
         metadata["year"] = year_match.group(0)
 
     # Heuristik Penerbit Sederhana
     publishers = ["Elsevier", "Springer", "IEEE", "MDPI", "Nature", "Science", "Wiley", "Taylor & Francis", "ACM", "Frontiers", "Sage", "Medium", "BBC", "CNN", "Wikipedia"]
     for pub in publishers:
-        if pub.lower() in full_text[:10000].lower():
+        if pub.lower() in text_str[:10000].lower():
             metadata["publisher"] = pub
             break
 
     return metadata
 
-def process_extracted_text(full_text, title):
+def process_extracted_text(full_text, title, base_metadata=None):
     # Pastikan input adalah string
-    if not isinstance(full_text, str):
-        full_text = str(full_text)
+    text_str = str(full_text)
         
     # 1. Batasi total teks (200.000 karakter)
     limit_total = 200000
-    limited_text = full_text[:limit_total]
+    limited_text = text_str[:limit_total]
 
-    # 2. Heuristik metadata
-    metadata = extract_metadata_heuristics(limited_text, title)
+    # 2. Gabungkan Heuristik atau Metadata dari API
+    if base_metadata:
+        metadata = {**extract_metadata_heuristics(limited_text, title), **base_metadata}
+    else:
+        metadata = extract_metadata_heuristics(limited_text, title)
     
     # 3. Snippet untuk AI (Groq/Gemini) - 7500 karakter
     ai_snippet = limited_text[:7500]
@@ -90,55 +127,57 @@ def extract():
             if not url:
                 return jsonify({"status": "error", "message": "No URL provided"}), 400
             
+            # --- TAHAP 1: CEK DOI (AKADEMIK) ---
+            doi = extract_doi(url)
+            academic_meta = None
+            if doi:
+                academic_meta = fetch_from_crossref(doi)
+            
+            # --- TAHAP 2: SCRAPING (GENERAL FALLBACK) ---
             try:
-                # Headers yang lebih lengkap untuk menghindari 403 Forbidden
+                session = requests.Session()
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                    'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'Cache-Control': 'max-age=0'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
                 }
                 
-                response = requests.get(url, headers=headers, timeout=20)
+                response = session.get(url, headers=headers, timeout=20, allow_redirects=True)
                 response.raise_for_status()
                 
-                # Gunakan response.text (string) bukan response.content (bytes) 
-                # untuk menghindari error regex "bytes-like object" di dalam library
-                html_str = response.text
+                # Gunakan response.text (string) secara eksplisit
+                html_str = str(response.text)
                 
-                # Alur: Readability (Main Extraction)
+                # Alur: Readability
                 doc = ReadabilityDoc(html_str)
                 summary_html = doc.summary()
-                title = doc.short_title()
+                title = academic_meta.get('title') if academic_meta else doc.short_title()
                 
-                # Alur: BeautifulSoup (Paragraph Cleaning)
+                # Alur: BeautifulSoup
                 soup = BeautifulSoup(summary_html, 'lxml')
-                
-                # Hapus elemen sampah yang mungkin tersisa
                 for s in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe', 'button', 'input']):
                     s.decompose()
                 
-                # Ambil teks bersih
-                full_text = soup.get_text(separator=' ')
-                full_text = clean_text(full_text)
+                full_text = clean_text(soup.get_text(separator=' '))
                 
                 if not full_text.strip():
-                    return jsonify({"status": "error", "message": "Content extraction returned empty text. The page might be protected or dynamic."}), 422
+                    if academic_meta:
+                        # Jika scraping diblokir tapi Metadata API ada, tetap kirim metadata
+                        return jsonify({"status": "success", "data": process_extracted_text("Content extraction blocked by provider, but metadata retrieved via DOI.", title, academic_meta)})
+                    return jsonify({"status": "error", "message": "Content extraction failed. The page might be protected."}), 422
                 
-                result_data = process_extracted_text(full_text, title)
+                result_data = process_extracted_text(full_text, title, academic_meta)
                 return jsonify({"status": "success", "data": result_data})
 
             except requests.exceptions.HTTPError as e:
+                # Jika scraping gagal tapi kita punya Metadata DOI, gunakan itu
+                if academic_meta:
+                    return jsonify({"status": "success", "data": process_extracted_text("Full text extraction failed due to access restrictions, but metadata was found.", academic_meta.get('title'), academic_meta)})
+                
                 status_code = e.response.status_code if e.response else 500
-                return jsonify({"status": "error", "message": f"Website blocked access (Error {status_code}). Some academic sites require VPN or institutional login."}), status_code
+                return jsonify({"status": "error", "message": f"Website blocked access (Error {status_code})."}), status_code
             except Exception as e:
                 return jsonify({"status": "error", "message": f"Web Extraction Error: {str(e)}"}), 500
 
@@ -151,20 +190,6 @@ def extract():
             return jsonify({"status": "error", "message": "No file selected"}), 400
 
         filename_lower = file.filename.lower()
-        
-        # Audio/Video rejection
-        audio_video_ext = ('.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm')
-        if filename_lower.endswith(audio_video_ext):
-            return jsonify({"status": "error", "message": "Audio and video files are not supported."}), 400
-
-        # Legacy conversion rejection
-        legacy_ext = ('.doc', '.xls', '.ppt')
-        if filename_lower.endswith(legacy_ext):
-             return jsonify({
-                "status": "error", 
-                "message": "Legacy format detected. Please convert to modern format (.docx, .xlsx, .pptx)."
-            }), 422
-
         file_bytes = file.read()
         f = io.BytesIO(file_bytes)
         full_text = ""
