@@ -1,8 +1,9 @@
-import React, { useState, useMemo } from 'react';
+
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 // @ts-ignore
 import { useNavigate } from 'react-router-dom';
 import { SourceType, FileFormat, LibraryItem, LibraryType } from '../../types';
-import { saveLibraryItem, uploadAndStoreFile } from '../../services/gasService';
+import { saveLibraryItem, uploadAndStoreFile, extractFromUrl } from '../../services/gasService';
 import { extractMetadataWithAI } from '../../services/AddCollectionService';
 import { 
   CheckIcon, 
@@ -31,6 +32,7 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [extractionStage, setExtractionStage] = useState<'IDLE' | 'READING' | 'AI_ANALYSIS'>('IDLE');
   const [file, setFile] = useState<File | null>(null);
+  const lastExtractedUrl = useRef<string>("");
   
   const [formData, setFormData] = useState({
     addMethod: 'LINK' as 'LINK' | 'FILE',
@@ -65,6 +67,58 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
     allLabels: Array.from(new Set(items.flatMap(i => i.labels || []).filter(Boolean))),
   }), [items]);
 
+  // Handle Automatic URL Extraction
+  useEffect(() => {
+    const handleUrlExtraction = async () => {
+      const url = formData.url.trim();
+      if (url && url.startsWith('http') && url !== lastExtractedUrl.current && formData.addMethod === 'LINK') {
+        lastExtractedUrl.current = url;
+        setExtractionStage('READING');
+        try {
+          const result = await extractFromUrl(url);
+          if (result) {
+            setExtractionStage('AI_ANALYSIS');
+            const aiMeta = await extractMetadataWithAI(result.aiSnippet || result.fullText || "");
+            
+            setFormData(prev => ({
+              ...prev,
+              title: aiMeta.title || result.title || prev.title,
+              year: aiMeta.year || result.year || prev.year,
+              publisher: aiMeta.publisher || result.publisher || prev.publisher,
+              authors: (aiMeta.authors && aiMeta.authors.length > 0) ? aiMeta.authors : (result.authors || prev.authors),
+              keywords: (aiMeta.keywords && aiMeta.keywords.length > 0) ? aiMeta.keywords : (result.keywords || prev.keywords),
+              labels: (aiMeta.labels && aiMeta.labels.length > 0) ? aiMeta.labels : prev.labels,
+              type: (aiMeta.type as LibraryType) || (result.type as LibraryType) || prev.type,
+              category: aiMeta.category || result.category || prev.category,
+              topic: aiMeta.topic || prev.topic,
+              subTopic: aiMeta.subTopic || prev.subTopic,
+              inTextAPA: aiMeta.inTextAPA || '',
+              inTextHarvard: aiMeta.inTextHarvard || '',
+              inTextChicago: aiMeta.inTextChicago || '',
+              bibAPA: aiMeta.bibAPA || '',
+              bibHarvard: aiMeta.bibHarvard || '',
+              bibChicago: aiMeta.bibChicago || '',
+              chunks: result.chunks || []
+            }));
+          }
+        } catch (err: any) {
+          console.error("Link extraction failed:", err);
+          showXeenapsAlert({ 
+            icon: 'warning', 
+            title: 'Extraction Notice', 
+            text: err.message || 'Automatic metadata extraction failed for this link. You can still fill it manually.', 
+            confirmButtonText: 'OK' 
+          });
+        } finally {
+          setExtractionStage('IDLE');
+        }
+      }
+    };
+
+    const timeoutId = setTimeout(handleUrlExtraction, 1000);
+    return () => clearTimeout(timeoutId);
+  }, [formData.url, formData.addMethod]);
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
@@ -83,10 +137,7 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
       try {
         const result = await uploadAndStoreFile(selectedFile);
         if (result) {
-          const processedChunks = result.chunks || [];
           setExtractionStage('AI_ANALYSIS');
-          
-          // AI tetap digunakan hanya untuk analisa metadata awal
           const aiMeta = await extractMetadataWithAI(result.aiSnippet || result.fullText || "");
           
           setFormData(prev => ({
@@ -101,18 +152,17 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
             category: aiMeta.category || result.category || prev.category,
             topic: aiMeta.topic || prev.topic,
             subTopic: aiMeta.subTopic || prev.subTopic,
-            fileId: result.fileId || prev.fileId,
             inTextAPA: aiMeta.inTextAPA || '',
             inTextHarvard: aiMeta.inTextHarvard || '',
             inTextChicago: aiMeta.inTextChicago || '',
             bibAPA: aiMeta.bibAPA || '',
             bibHarvard: aiMeta.bibHarvard || '',
             bibChicago: aiMeta.bibChicago || '',
-            chunks: processedChunks 
+            chunks: result.chunks || []
           }));
         }
       } catch (err: any) {
-        console.error("Extraction workflow failed:", err);
+        console.error("File extraction failed:", err);
         showXeenapsAlert({ 
           icon: 'warning', 
           title: 'Extraction Notice', 
@@ -138,24 +188,27 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
     }
 
     setIsSubmitting(true);
-    
     let detectedFormat = FileFormat.PDF;
+    let fileUploadData = undefined;
+
     if (file) {
       const extension = file.name.split('.').pop()?.toLowerCase();
-      switch (extension) {
-        case 'pptx': detectedFormat = FileFormat.PPTX; break;
-        case 'ppt': detectedFormat = FileFormat.PPT; break;
-        case 'docx': detectedFormat = FileFormat.DOCX; break;
-        case 'doc': detectedFormat = FileFormat.DOC; break;
-        case 'xlsx': detectedFormat = FileFormat.XLSX; break;
-        case 'xls': detectedFormat = FileFormat.XLS; break;
-        case 'csv': detectedFormat = FileFormat.CSV; break;
-        case 'txt': detectedFormat = FileFormat.TXT; break;
-        case 'md': detectedFormat = FileFormat.MD; break;
-        case 'epub': detectedFormat = FileFormat.EPUB; break;
-        case 'jpg': case 'jpeg': case 'png': case 'gif': detectedFormat = FileFormat.PDF; break; // Gambar diproses sebagai konten dokumen
-        default: detectedFormat = FileFormat.PDF;
-      }
+      const formatMap: Record<string, FileFormat> = {
+        'pptx': FileFormat.PPTX, 'ppt': FileFormat.PPT,
+        'docx': FileFormat.DOCX, 'doc': FileFormat.DOC,
+        'xlsx': FileFormat.XLSX, 'xls': FileFormat.XLS,
+        'csv': FileFormat.CSV, 'txt': FileFormat.TXT,
+        'md': FileFormat.MD, 'epub': FileFormat.EPUB
+      };
+      detectedFormat = formatMap[extension || ''] || FileFormat.PDF;
+
+      const reader = new FileReader();
+      const base64Promise = new Promise<string>((resolve) => {
+        reader.onload = () => resolve((reader.result as string).split(',')[1]);
+        reader.readAsDataURL(file);
+      });
+      const fileData = await base64Promise;
+      fileUploadData = { fileName: file.name, mimeType: file.type || 'application/octet-stream', fileData: fileData };
     }
 
     const newItem: LibraryItem = {
@@ -175,7 +228,7 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
       source: formData.addMethod === 'LINK' ? SourceType.LINK : SourceType.FILE,
       format: formData.addMethod === 'LINK' ? FileFormat.URL : detectedFormat,
       url: formData.addMethod === 'LINK' ? formData.url : '',
-      fileId: formData.addMethod === 'FILE' ? formData.fileId : '',
+      fileId: '',
       keywords: formData.keywords,
       labels: formData.labels,
       tags: [...formData.keywords, ...formData.labels],
@@ -206,7 +259,7 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
       extractedInfo10: formData.chunks[9] || '',
     };
 
-    const success = await saveLibraryItem(newItem);
+    const success = await saveLibraryItem(newItem, fileUploadData);
     if (success) {
       onComplete();
       navigate('/');
@@ -232,8 +285,28 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
             {formData.addMethod === 'LINK' ? (
               <FormField label="Reference URL" required error={!formData.url}>
                 <div className="relative group">
-                  <LinkIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-300 group-focus-within:text-[#004A74] transition-colors" />
-                  <input className={`w-full pl-12 pr-4 py-4 bg-gray-50 rounded-2xl focus:ring-2 focus:ring-[#004A74]/10 focus:border-[#004A74] outline-none border ${!formData.url ? 'border-red-300' : 'border-gray-200'} shadow-sm text-sm font-medium transition-all`} placeholder="Paste research link, PDF URL, or web page here..." value={formData.url} onChange={(e) => setFormData({...formData, url: e.target.value})} />
+                  <div className="absolute left-4 top-1/2 -translate-y-1/2 flex items-center">
+                    {isExtracting ? (
+                      <ArrowPathIcon className="w-5 h-5 text-[#004A74] animate-spin" />
+                    ) : (
+                      <LinkIcon className="w-5 h-5 text-gray-300 group-focus-within:text-[#004A74] transition-colors" />
+                    )}
+                  </div>
+                  <input 
+                    className={`w-full pl-12 pr-4 py-4 bg-gray-50 rounded-2xl focus:ring-2 focus:ring-[#004A74]/10 focus:border-[#004A74] outline-none border ${!formData.url ? 'border-red-300' : 'border-gray-200'} shadow-sm text-sm font-medium transition-all ${isExtracting ? 'opacity-80 cursor-wait' : ''}`} 
+                    placeholder="Paste research link, Drive link, or web page..." 
+                    value={formData.url} 
+                    onChange={(e) => setFormData({...formData, url: e.target.value})}
+                    disabled={isExtracting}
+                  />
+                  {isExtracting && (
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2 animate-in fade-in slide-in-from-right-2">
+                       <SparklesIcon className="w-4 h-4 text-[#FED400] animate-pulse" />
+                       <span className="text-[10px] font-black text-[#004A74] uppercase tracking-tighter">
+                         {extractionStage === 'READING' ? 'Reading...' : 'Analyzing...'}
+                       </span>
+                    </div>
+                  )}
                 </div>
               </FormField>
             ) : (
@@ -246,7 +319,6 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
                         {extractionStage === 'AI_ANALYSIS' && <SparklesIcon className="w-8 h-8 text-[#FED400] absolute top-1 left-1 animate-pulse" />}
                       </div>
                       <p className="text-sm font-black text-[#004A74] tracking-widest uppercase">{extractionStage === 'READING' ? 'Reading Content...' : 'AI Metadata Analysis...'}</p>
-                      <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-tighter">Please wait while we scan your document</p>
                     </div>
                   ) : (
                     <>
@@ -254,13 +326,7 @@ const LibraryForm: React.FC<LibraryFormProps> = ({ onComplete, items = [] }) => 
                       <p className="text-sm text-gray-500 group-hover:text-[#004A74] px-6 text-center">{file ? <span className="font-bold text-[#004A74]">{file.name}</span> : "Drop PDF, Word, PPT, Excel or Image here (Max 25Mb)"}</p>
                     </>
                   )}
-                  <input 
-                    type="file" 
-                    className="hidden" 
-                    onChange={handleFileChange} 
-                    accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.epub,.jpg,.jpeg,.png" 
-                    disabled={isExtracting} 
-                  />
+                  <input type="file" className="hidden" onChange={handleFileChange} accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.epub,.jpg,.jpeg,.png" disabled={isExtracting} />
                 </label>
               </FormField>
             )}

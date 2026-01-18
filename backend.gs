@@ -1,7 +1,8 @@
 
 /**
- * XEENAPS PKM - SECURE BACKEND V14 (ACADEMIC EDITION)
- * Enhanced for Excel and PowerPoint extraction compatibility
+ * XEENAPS PKM - SECURE BACKEND V16
+ * Delayed storage implementation: extraction only vs permanent saving.
+ * Added: Link extraction (Google Drive & Web) with Ghost Extraction logic.
  */
 
 const CONFIG = {
@@ -52,35 +53,48 @@ function doPost(e) {
     if (action === 'setupDatabase') {
       return createJsonResponse(setupDatabase());
     }
+    
     if (action === 'saveItem') {
-      saveToSheet(CONFIG.SPREADSHEETS.LIBRARY, "Collections", body.item);
+      const item = body.item;
+      if (body.file && body.file.fileData) {
+        const folder = DriveApp.getFolderById(CONFIG.FOLDERS.MAIN_LIBRARY);
+        const mimeType = body.file.mimeType || 'application/octet-stream';
+        const blob = Utilities.newBlob(Utilities.base64Decode(body.file.fileData), mimeType, body.file.fileName);
+        const file = folder.createFile(blob);
+        item.fileId = file.getId();
+      }
+      saveToSheet(CONFIG.SPREADSHEETS.LIBRARY, "Collections", item);
       return createJsonResponse({ status: 'success' });
     }
+    
     if (action === 'deleteItem') {
       deleteFromSheet(CONFIG.SPREADSHEETS.LIBRARY, "Collections", body.id);
       return createJsonResponse({ status: 'success' });
     }
-    if (action === 'uploadOnly') {
-      const folder = DriveApp.getFolderById(CONFIG.FOLDERS.MAIN_LIBRARY);
-      const mimeType = body.mimeType || 'application/octet-stream';
-      const blob = Utilities.newBlob(Utilities.base64Decode(body.fileData), mimeType, body.fileName);
-      const file = folder.createFile(blob);
-      const fileId = file.getId();
-
-      // Programmatic Extraction (Non-AI)
+    
+    if (action === 'extractOnly') {
       let extractedText = "";
+      let fileName = body.fileName || "Extracted Content";
+      
       try {
-        extractedText = extractTextContent(blob, mimeType);
+        if (body.url) {
+          extractedText = handleUrlExtraction(body.url);
+        } else if (body.fileData) {
+          const mimeType = body.mimeType || 'application/octet-stream';
+          const blob = Utilities.newBlob(Utilities.base64Decode(body.fileData), mimeType, fileName);
+          extractedText = extractTextContent(blob, mimeType);
+        }
       } catch (err) {
         extractedText = "Extraction failed: " + err.toString();
       }
 
       return createJsonResponse({ 
         status: 'success', 
-        fileId: fileId, 
-        extractedText: extractedText 
+        extractedText: extractedText,
+        fileName: fileName
       });
     }
+    
     if (action === 'aiProxy') {
       const { provider, prompt, modelOverride } = body;
       const result = handleAiRequest(provider, prompt, modelOverride);
@@ -93,15 +107,71 @@ function doPost(e) {
 }
 
 /**
- * Menggunakan fitur konversi Google Drive untuk mengekstrak teks secara programmatic.
+ * Parses Drive URL to extract File ID
  */
-function extractTextContent(blob, mimeType) {
-  // 1. Teks dasar (Txt, MD, CSV)
-  if (mimeType.includes('text/') || mimeType.includes('csv')) {
-    return blob.getDataAsString();
+function getFileIdFromUrl(url) {
+  const match = url.match(/[-\w]{25,}/);
+  return match ? match[0] : null;
+}
+
+/**
+ * Main URL extraction router
+ */
+function handleUrlExtraction(url) {
+  const driveId = getFileIdFromUrl(url);
+  
+  if (driveId && url.includes('drive.google.com')) {
+    try {
+      const fileMeta = Drive.Files.get(driveId);
+      const mimeType = fileMeta.mimeType;
+      const size = parseInt(fileMeta.size || "0");
+      
+      // Safety Guard for Binary Files
+      const isNative = mimeType.includes('google-apps');
+      if (!isNative && size > 25 * 1024 * 1024) {
+        throw new Error("File is too large (>25MB) for automatic scanning. Please fill metadata manually.");
+      }
+
+      // Handle Native files directly
+      if (isNative) {
+        if (mimeType.includes('document')) return DocumentApp.openById(driveId).getBody().getText();
+        if (mimeType.includes('spreadsheet')) {
+          return SpreadsheetApp.openById(driveId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
+        }
+        if (mimeType.includes('presentation')) {
+          return SlidesApp.openById(driveId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
+        }
+      }
+
+      // Ghost Extraction for Binary Files via Link
+      const blob = DriveApp.getFileById(driveId).getBlob();
+      return extractTextContent(blob, mimeType);
+    } catch (e) {
+      throw new Error("Google Drive access failed. Ensure the link is shared as 'Anyone with the link can view'. Detail: " + e.message);
+    }
   }
 
-  // 2. OCR/Konversi Dokumen (PDF, Word, PPT, Image, Excel)
+  // Regular Web Link Extraction
+  try {
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const html = response.getContentText();
+    // Simple text extraction from HTML
+    return html.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gim, "")
+               .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gim, "")
+               .replace(/<[^>]*>/g, " ")
+               .replace(/\s+/g, " ")
+               .trim();
+  } catch (e) {
+    throw new Error("Website fetch failed: " + e.message);
+  }
+}
+
+/**
+ * Ghost Extraction logic: Copy -> Convert -> Read -> Remove
+ */
+function extractTextContent(blob, mimeType) {
+  if (mimeType.includes('text/') || mimeType.includes('csv')) return blob.getDataAsString();
+
   let targetMimeType = 'application/vnd.google-apps.document';
   let appType = 'doc';
   
@@ -113,71 +183,39 @@ function extractTextContent(blob, mimeType) {
     appType = 'slide';
   }
 
-  const resource = {
-    name: blob.getName(),
-    mimeType: targetMimeType
-  };
-
+  const resource = { name: "Xeenaps_Temp_" + blob.getName(), mimeType: targetMimeType };
   let tempFileId = null;
+  
   try {
-    // Unggah dan konversi sementara ke tipe Google yang sesuai
     const tempFile = Drive.Files.create(resource, blob);
     tempFileId = tempFile.id;
     let text = "";
 
     if (appType === 'doc') {
-      const tempDoc = DocumentApp.openById(tempFileId);
-      text = tempDoc.getBody().getText();
+      text = DocumentApp.openById(tempFileId).getBody().getText();
     } else if (appType === 'sheet') {
-      const tempSs = SpreadsheetApp.openById(tempFileId);
-      const sheets = tempSs.getSheets();
-      text = sheets.map(s => {
-        const values = s.getDataRange().getValues();
-        return values.map(row => row.join(" ")).join("\n");
-      }).join("\n");
+      text = SpreadsheetApp.openById(tempFileId).getSheets().map(s => s.getDataRange().getValues().map(r => r.join(" ")).join("\n")).join("\n");
     } else if (appType === 'slide') {
-      const tempSlide = SlidesApp.openById(tempFileId);
-      const slides = tempSlide.getSlides();
-      text = slides.map(s => {
-        return s.getShapes().map(sh => {
-          try {
-            return sh.getText().asString();
-          } catch(e) {
-            return "";
-          }
-        }).join(" ");
-      }).join("\n");
+      text = SlidesApp.openById(tempFileId).getSlides().map(s => s.getShapes().map(sh => { try { return sh.getText().asString(); } catch(e) { return ""; } }).join(" ")).join("\n");
     }
     
-    // Hapus file sementara segera
-    Drive.Files.remove(tempFileId);
+    Drive.Files.remove(tempFileId); // Hard delete
     return text;
   } catch (e) {
-    // Cleanup jika error terjadi setelah file terbuat
-    if (tempFileId) {
-      try { Drive.Files.remove(tempFileId); } catch(i) {}
-    }
-    throw new Error("Extraction failed: " + e.message);
+    if (tempFileId) { try { Drive.Files.remove(tempFileId); } catch(i) {} }
+    throw new Error("Conversion failed: " + e.message);
   }
 }
 
-/**
- * Otomatisasi Setup Database - Membuat sheet dan header jika belum ada.
- */
 function setupDatabase() {
   try {
     const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEETS.LIBRARY);
     let sheet = ss.getSheetByName("Collections");
-    
-    if (!sheet) {
-      sheet = ss.insertSheet("Collections");
-    }
-    
+    if (!sheet) sheet = ss.insertSheet("Collections");
     const headers = CONFIG.SCHEMAS.LIBRARY;
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#f3f3f3");
     sheet.setFrozenRows(1);
-    
     return { status: 'success', message: 'Database initialized successfully.' };
   } catch (err) {
     return { status: 'error', message: err.toString() };

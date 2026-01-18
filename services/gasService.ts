@@ -101,7 +101,61 @@ export const fetchAiConfig = async (): Promise<{ model: string }> => {
 };
 
 /**
- * Mengunggah file ke GAS dan mengekstrak teks secara programmatic.
+ * Helper to wrap extracted text for AI analysis
+ */
+const processExtractedText = (extractedText: string, defaultTitle: string = ""): ExtractionResult => {
+  const limitTotal = 200000;
+  const limitedText = extractedText.substring(0, limitTotal);
+  const aiSnippet = limitedText.substring(0, 7500);
+  
+  const chunkSize = 20000;
+  const chunks: string[] = [];
+  for (let i = 0; i < limitedText.length; i += chunkSize) {
+    if (chunks.length >= 10) break;
+    chunks.push(limitedText.substring(i, i + chunkSize));
+  }
+
+  return {
+    title: defaultTitle,
+    fullText: limitedText,
+    aiSnippet,
+    chunks
+  } as ExtractionResult;
+};
+
+/**
+ * EKSTRAKSI DARI URL (Google Drive atau Website)
+ */
+export const extractFromUrl = async (url: string): Promise<ExtractionResult | null> => {
+  try {
+    if (!GAS_WEB_APP_URL) throw new Error('VITE_GAS_URL is missing.');
+
+    const gasResponse = await fetch(GAS_WEB_APP_URL, {
+      method: 'POST',
+      body: JSON.stringify({ 
+        action: 'extractOnly', 
+        url
+      }),
+    });
+
+    if (!gasResponse.ok) {
+      const errText = await gasResponse.text();
+      throw new Error(`Extraction Failed: ${errText}`);
+    }
+    
+    const gasResult = await gasResponse.json();
+    if (gasResult.status !== 'success') throw new Error(gasResult.message || 'Link processing failed.');
+
+    return processExtractedText(gasResult.extractedText || "", gasResult.fileName || "");
+
+  } catch (error: any) {
+    console.error('Link Extraction Error:', error);
+    throw error;
+  }
+};
+
+/**
+ * MENGIRIM FILE UNTUK EKSTRAKSI SAJA.
  */
 export const uploadAndStoreFile = async (file: File): Promise<ExtractionResult | null> => {
   try {
@@ -120,7 +174,7 @@ export const uploadAndStoreFile = async (file: File): Promise<ExtractionResult |
     const gasResponse = await fetch(GAS_WEB_APP_URL, {
       method: 'POST',
       body: JSON.stringify({ 
-        action: 'uploadOnly', 
+        action: 'extractOnly', 
         fileData, 
         fileName: file.name,
         mimeType: file.type || 'application/octet-stream'
@@ -129,47 +183,41 @@ export const uploadAndStoreFile = async (file: File): Promise<ExtractionResult |
 
     if (!gasResponse.ok) {
       const errText = await gasResponse.text();
-      throw new Error(`Upload Failed: ${errText}`);
+      throw new Error(`Extraction Failed: ${errText}`);
     }
     
     const gasResult = await gasResponse.json();
-    if (gasResult.status !== 'success') throw new Error(gasResult.message || 'File processing failed at GAS.');
+    if (gasResult.status !== 'success') throw new Error(gasResult.message || 'File processing failed.');
 
-    const extractedText = gasResult.extractedText || "";
-    const fileId = gasResult.fileId || "";
-
-    const limitTotal = 200000;
-    const limitedText = extractedText.substring(0, limitTotal);
-    const aiSnippet = limitedText.substring(0, 7500);
-    
-    const chunkSize = 20000;
-    const chunks: string[] = [];
-    for (let i = 0; i < limitedText.length; i += chunkSize) {
-      if (chunks.length >= 10) break;
-      chunks.push(limitedText.substring(i, i + chunkSize));
-    }
-
-    return {
-      title: file.name.split('.')[0].replace(/_/g, ' '),
-      fileId,
-      fullText: limitedText,
-      aiSnippet,
-      chunks
-    } as ExtractionResult;
+    return processExtractedText(gasResult.extractedText || "", file.name.split('.')[0].replace(/_/g, ' '));
 
   } catch (error: any) {
-    console.error('Extraction/Storage Error:', error);
+    console.error('Extraction Error:', error);
     throw error;
   }
 };
 
-export const saveLibraryItem = async (item: LibraryItem): Promise<boolean> => {
+/**
+ * MENYIMPAN ITEM KE SPREADSHEET.
+ */
+export const saveLibraryItem = async (
+  item: LibraryItem, 
+  fileContent?: { fileName: string; mimeType: string; fileData: string }
+): Promise<boolean> => {
   try {
     if (!GAS_WEB_APP_URL) throw new Error('VITE_GAS_URL is missing.');
+    
+    const payload = { 
+      action: 'saveItem', 
+      item, 
+      file: fileContent 
+    };
+
     const response = await fetch(GAS_WEB_APP_URL, {
       method: 'POST',
-      body: JSON.stringify({ action: 'saveItem', item }),
+      body: JSON.stringify(payload),
     });
+
     const result: GASResponse<any> = await response.json();
     if (result.status === 'success') {
       Toast.fire({ 
